@@ -335,6 +335,8 @@ func (h *Handlers) bridgePost(w http.ResponseWriter, r *http.Request) {
 		Target string
 	}{user.Username, action, time.Now().Format("2006-01-02 15:04"), target}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
 	if err := transferDoneTmpl.Execute(w, view); err != nil {
 		log.Printf("render bridge redirect: %v", err)
 	}
