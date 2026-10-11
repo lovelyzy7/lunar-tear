@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	memoirMaxLevel     = int32(15)
+	memoirMaxLevel    = int32(15)
 	memoirInventoryCap = 999
 )
 

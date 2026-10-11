@@ -184,6 +184,10 @@ type request struct {
 	ContentsStoryIDs []int32                `json:"contents_story_ids"`
 	QuestIDs         []int32                `json:"quest_ids"`
 	Missions         []missionSpec          `json:"missions"`
+	TutorialTypes    []int32                `json:"tutorial_types"`
+	Tutorials        []tutorialSpec         `json:"tutorials"`
+	CreateDeck       bool                   `json:"create_deck"`
+	GrantCompanion   bool                   `json:"grant_companion"`
 
 	// set_user_info: pointer fields so only the provided ones are changed.
 	Name    *string `json:"name,omitempty"`
@@ -195,11 +199,15 @@ type request struct {
 }
 
 type response struct {
-	OK       bool        `json:"ok"`
-	Error    string      `json:"error,omitempty"`
-	Applied  int         `json:"applied,omitempty"`
-	QuestIDs []int32     `json:"quest_ids,omitempty"`
-	Quests   []questInfo `json:"quests,omitempty"`
+	OK              bool        `json:"ok"`
+	Error           string      `json:"error,omitempty"`
+	Applied         int         `json:"applied,omitempty"`
+	QuestIDs        []int32     `json:"quest_ids,omitempty"`
+	Quests          []questInfo `json:"quests,omitempty"`
+	TutorialTypes   []int32     `json:"tutorial_types,omitempty"`
+	TutorialSkipped []int32     `json:"tutorial_skipped,omitempty"`
+	DeckCreated     bool        `json:"deck_created,omitempty"`
+	CompanionID     int32       `json:"companion_id,omitempty"`
 }
 
 // queryQuests is set by read-only list actions (list_quests) and emitted by main.
@@ -407,6 +415,10 @@ func run() (int, error) {
 		return runRevertQuests(&req)
 	case "set_user_info":
 		return runSetUserInfo(&req)
+	case "prep_tutorials":
+		return runPrepTutorials(&req)
+	case "clear_tutorials":
+		return runClearTutorials(&req)
 	case "delete_user":
 		return runDeleteUser(&req)
 	case "":
@@ -423,5 +435,14 @@ func main() {
 		_ = enc.Encode(response{OK: false, Error: err.Error()})
 		os.Exit(1)
 	}
-	_ = enc.Encode(response{OK: true, Applied: applied, QuestIDs: queryQuestIDs, Quests: queryQuests})
+	_ = enc.Encode(response{
+		OK:              true,
+		Applied:         applied,
+		QuestIDs:        queryQuestIDs,
+		Quests:          queryQuests,
+		TutorialTypes:   queryTutorialTypes,
+		TutorialSkipped: queryTutorialSkipped,
+		DeckCreated:     queryDeckCreated,
+		CompanionID:     queryCompanionID,
+	})
 }

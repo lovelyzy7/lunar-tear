@@ -62,15 +62,13 @@ var transferDoneTmpl = template.Must(template.New("transferDone").Parse(
 <style>
 :root{--bg-cream:#cfc7b0;--bg-cream-dark:#b8b099;--fg-dark:#2c2922;--fg-mid:#57523f;--accent:#1a1814;--panel:#d8d1bb;--success:#3a4d24}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg-cream);color:var(--fg-dark);font-family:"Segoe UI","Tahoma","Verdana",sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
-.card{background:var(--panel);border:2px solid var(--accent);box-shadow:6px 6px 0 var(--accent);max-width:420px;width:100%;padding:28px 24px;text-align:center}
-.title{font-size:20px;letter-spacing:.14em;margin:0 0 18px;padding-bottom:12px;border-bottom:1px solid var(--accent)}
-.badge{display:inline-block;background:var(--success);color:var(--bg-cream);font-size:12px;letter-spacing:.12em;padding:4px 12px;margin-bottom:16px}
-.row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px dashed var(--fg-mid);font-size:14px}
+body{margin:0;background:var(--bg-cream);color:var(--fg-dark);font-family:"Segoe UI","Tahoma","Verdana",sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:16px}
+.card{background:var(--panel);border:2px solid var(--accent);box-shadow:6px 6px 0 var(--accent);max-width:420px;width:100%;padding:22px 20px;text-align:center}
+.title{font-size:19px;letter-spacing:.14em;margin:0 0 14px;padding-bottom:10px;border-bottom:1px solid var(--accent)}
+.badge{display:inline-block;background:var(--success);color:var(--bg-cream);font-size:12px;letter-spacing:.12em;padding:4px 12px;margin-bottom:12px}
+.row{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px dashed var(--fg-mid);font-size:14px}
+.row:last-child{border-bottom:none}
 .row b{font-weight:600}
-.muted{color:var(--fg-mid);font-size:12px;margin-top:16px;line-height:1.6}
-.btn{display:inline-block;margin-top:18px;padding:10px 22px;background:var(--bg-cream-dark);border:2px solid var(--accent);color:var(--fg-dark);text-decoration:none;font-size:14px;letter-spacing:.08em}
-.btn:active{transform:translate(1px,1px)}
 </style></head><body>
 <div class="card">
   <h1 class="title">デ ー タ 引 継 ぎ</h1>
@@ -78,8 +76,6 @@ body{margin:0;background:var(--bg-cream);color:var(--fg-dark);font-family:"Segoe
   <div class="row"><span>アカウント</span><b>{{.User}}</b></div>
   <div class="row"><span>処理</span><b>{{.Action}}</b></div>
   <div class="row"><span>日時</span><b>{{.Time}}</b></div>
-  <p class="muted">このウィンドウを閉じてください。<br>Close this window to continue.</p>
-  <a class="btn" href="{{.Target}}">ゲームに戻る</a>
 </div>
 </body></html>
 `))

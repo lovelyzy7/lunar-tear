@@ -108,8 +108,8 @@ func runExalt(req *request) (int, error) {
 
 // runReleasePanels mirrors lunar-tear's CharacterBoardService.ReleasePanel
 // flow, minus cost consumption. For every panel id in the request we:
-//  1. Set the appropriate panel-release bit on the panel's board.
-//  2. Apply each release effect (status-up or ability) to the user state.
+//   1. Set the appropriate panel-release bit on the panel's board.
+//   2. Apply each release effect (status-up or ability) to the user state.
 //
 // The catalog is loaded fresh per invocation; cold cost ~300-600ms but
 // batches of thousands of panel ids share that single load.
