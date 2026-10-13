@@ -69,6 +69,7 @@ func (s *UserServiceServer) RegisterUser(ctx context.Context, req *pb.RegisterUs
 func (s *UserServiceServer) Auth(ctx context.Context, req *pb.AuthUserRequest) (*pb.AuthUserResponse, error) {
 	platform := model.ClientPlatformFromContext(ctx)
 	log.Printf("[UserService] Auth: uuid=%s platform=%s", req.Uuid, platform)
+	log.Printf("[UserService] Auth REQ DUMP: %+v", req)
 
 	session, err := s.sessions.CreateSession(req.Uuid, 24*time.Hour)
 	if err != nil {
@@ -108,6 +109,7 @@ func (s *UserServiceServer) TransferUser(ctx context.Context, req *pb.TransferUs
 	platform := model.ClientPlatformFromContext(ctx)
 
 	log.Printf("[UserService] TransferUser: uuid=%s platform=%s", req.Uuid, platform)
+	log.Printf("[UserService] TransferUser REQ DUMP: %+v", req)
 
 	userId, err := s.users.GetUserByUUID(req.Uuid)
 	if err != nil {

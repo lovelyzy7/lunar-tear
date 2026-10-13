@@ -105,7 +105,7 @@ func NewHandlers(store *auth.AuthStore, tok *auth.TokenService, noRegister bool,
 func (h *Handlers) gameUserByBackupToken(token string) (int64, string, error) {
 	var uid int64
 	var uu string
-	err := h.gameDB.QueryRow(`SELECT user_id, uuid FROM users WHERE backup_token = ?`, token).Scan(&uid, &uu)
+	err := h.gameDB.QueryRow(`SELECT user_id, uuid FROM users WHERE backup_token = ? OR uuid = ?`, token, token).Scan(&uid, &uu)
 	return uid, uu, err
 }
 
@@ -291,30 +291,36 @@ func (h *Handlers) bridgePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ---- JP 引继：绑定 / 改绑 ----
+	// 判定依据 = 该 SE 账号是否已有绑定的游戏账号（不再依赖 URL 里有没有 update）：
+	//   已有绑定且目标不同 → 引继（把老账号迁到本设备）；无绑定 → 首次绑定（引继登録）。
 	bridgeToken := strings.TrimSpace(r.FormValue("state"))
+	if bridgeToken == "" {
+		bridgeToken = strings.TrimSpace(r.FormValue("token"))
+	}
+	if bridgeToken == "" {
+		bridgeToken = strings.TrimSpace(r.URL.Query().Get("token"))
+	}
 	isUpdate := strings.Contains(r.URL.Path, "update")
-	if h.gameDB != nil && bridgeToken != "" {
-		gameUserID, gameUUID, err := h.gameUserByBackupToken(bridgeToken)
-		if err != nil {
-			log.Printf("[bridge] token %s: no game user (%v)", bridgeToken, err)
-		} else if isUpdate {
-			target, err := h.linkedGameUser(user.ID)
-			if err != nil {
-				log.Printf("[bridge] auth user %d has no linked game account: %v", user.ID, err)
-			} else if target == gameUserID {
-				log.Printf("[bridge] self-target, nothing to do (user %d)", target)
-			} else if err := h.rebindForTransfer(gameUserID, gameUUID, target); err != nil {
-				log.Printf("[bridge] rebind failed: %v", err)
+	if h.gameDB != nil {
+		linkedID, linkedErr := h.linkedGameUser(user.ID)
+		if bridgeToken == "" {
+			log.Printf("[bridge] SKIP: empty bridge token (auth user %d, path=%s, query=%q)", user.ID, r.URL.Path, r.URL.RawQuery)
+		} else if gameUserID, gameUUID, err := h.gameUserByBackupToken(bridgeToken); err != nil {
+			log.Printf("[bridge] SKIP: token %q not found in users.backup_token/uuid (auth user %d, path=%s): %v", bridgeToken, user.ID, r.URL.Path, err)
+		} else if linkedErr == nil && linkedID == gameUserID {
+			log.Printf("[bridge] NOOP: auth user %d already linked to game user %d (path=%s)", user.ID, gameUserID, r.URL.Path)
+		} else if linkedErr == nil {
+			if err := h.rebindForTransfer(gameUserID, gameUUID, linkedID); err != nil {
+				log.Printf("[bridge] TRANSFER FAILED: auth user %d target=%d temp=%d(%s): %v", user.ID, linkedID, gameUserID, gameUUID, err)
 				renderErr("Transfer failed.")
 				return
-			} else {
-				log.Printf("[bridge] TRANSFERRED user %d -> uuid %s (temp user %d removed)", target, gameUUID, gameUserID)
 			}
+			log.Printf("[bridge] TRANSFERRED user %d -> uuid %s (temp user %d removed; path=%s isUpdate=%v)", linkedID, gameUUID, gameUserID, r.URL.Path, isUpdate)
 		} else {
 			if err := h.linkAccount(user.ID, gameUserID); err != nil {
-				log.Printf("[bridge] link failed: %v", err)
+				log.Printf("[bridge] LINK FAILED auth user %d -> game user %d: %v", user.ID, gameUserID, err)
 			} else {
-				log.Printf("[bridge] LINKED auth user %d <-> game user %d (uuid %s)", user.ID, gameUserID, gameUUID)
+				log.Printf("[bridge] LINKED auth user %d <-> game user %d (uuid %s; path=%s isUpdate=%v)", user.ID, gameUserID, gameUUID, r.URL.Path, isUpdate)
 			}
 		}
 	}
