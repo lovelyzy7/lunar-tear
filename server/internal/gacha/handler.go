@@ -162,10 +162,12 @@ func clampDailyDraw(lastDate, todayStart int64, currentCount, maxCount, requeste
 	return requested, currentCount + requested, reset
 }
 
+// HandleRewardDraw spins the Special Gift Roulette count times (within the
+// daily limit) and returns the free gems of each spin.
 func (h *GachaHandler) HandleRewardDraw(
 	user *store.UserState,
 	count int32,
-) ([]DrawnItem, error) {
+) ([]int32, error) {
 	nowMillis := gametime.NowMillis()
 	todayStart := gametime.StartOfDayMillis()
 
@@ -182,10 +184,11 @@ func (h *GachaHandler) HandleRewardDraw(
 		return nil, fmt.Errorf("daily reward draw limit reached")
 	}
 
-	items := DrawReward(h.Pool.Materials, int(clamped))
-
-	for _, item := range items {
-		store.GrantPossession(user, model.PossessionType(item.PossessionType), item.PossessionId, 1)
+	gems := make([]int32, 0, clamped)
+	for range clamped {
+		won := DrawRoulette(CurrentRouletteRates(), rand.Intn)
+		store.GrantPossession(user, model.PossessionTypeFreeGem, 0, won)
+		gems = append(gems, won)
 	}
 
 	user.Gacha.TodaysCurrentDrawCount = newCount
@@ -193,12 +196,16 @@ func (h *GachaHandler) HandleRewardDraw(
 	user.Gacha.LastRewardDrawDate = nowMillis
 	user.Gacha.RewardAvailable = newCount < maxCount
 
-	return items, nil
+	return gems, nil
 }
 
 func (h *GachaHandler) drawPremium(entry store.GachaCatalogEntry, phase store.GachaPricePhaseEntry, count int) []DrawnItem {
+	cfg := Rates()
 	fixedMin := phase.FixedRarityMin
 	fixedCount := int(phase.FixedCount)
+	if fixedCount > 0 && fixedMin < cfg.GuaranteedRarity() {
+		fixedMin = cfg.GuaranteedRarity()
+	}
 
 	bp := h.Pool.BannerPools[entry.GachaId]
 	if bp == nil {
@@ -209,7 +216,7 @@ func (h *GachaHandler) drawPremium(entry store.GachaCatalogEntry, phase store.Ga
 	}
 
 	rateMultiplier := 1.0
-	if entry.GachaModeType == model.GachaModeStepup {
+	if entry.GachaModeType == model.GachaModeStepup && cfg.StepUpBoost {
 		switch phase.StepNumber {
 		case 1, 3:
 			rateMultiplier = model.StepUpRateBoost

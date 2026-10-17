@@ -350,33 +350,23 @@ func (s *GachaServiceServer) RewardDraw(ctx context.Context, req *pb.RewardDrawR
 	userId := CurrentUserId(ctx, s.users, s.sessions)
 	handler := s.holder.Get().GachaHandler
 
-	var items []gacha.DrawnItem
-	ownedCostumes := map[int32]bool{}
-	ownedWeapons := map[int32]bool{}
-	updatedUser, err := s.users.UpdateUser(userId, func(user *store.UserState) {
-		for _, c := range user.Costumes {
-			ownedCostumes[c.CostumeId] = true
-		}
-		for _, w := range user.Weapons {
-			ownedWeapons[w.WeaponId] = true
-		}
+	// The Special Gift Roulette: the wheel stops on the amount returned.
+	var gems []int32
+	if _, err := s.users.UpdateUser(userId, func(user *store.UserState) {
 		var drawErr error
-		items, drawErr = handler.HandleRewardDraw(user, 1)
+		gems, drawErr = handler.HandleRewardDraw(user, 1)
 		if drawErr != nil {
 			log.Printf("[GachaService] RewardDraw error: %v", drawErr)
 		}
-	})
-	if err != nil {
+	}); err != nil {
 		return nil, fmt.Errorf("update user: %w", err)
 	}
 
-	results := make([]*pb.RewardGachaItem, 0, len(items))
-	for _, item := range items {
+	results := make([]*pb.RewardGachaItem, 0, len(gems))
+	for _, won := range gems {
 		results = append(results, &pb.RewardGachaItem{
-			PossessionType: item.PossessionType,
-			PossessionId:   item.PossessionId,
-			Count:          1,
-			IsNew:          !isOwnedByType(item, ownedCostumes, ownedWeapons, updatedUser),
+			PossessionType: int32(model.PossessionTypeFreeGem),
+			Count:          won,
 		})
 	}
 

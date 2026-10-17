@@ -21,14 +21,18 @@ type DrawnItem struct {
 	CharacterId    int32
 }
 
+// Lunar Tear's rates; DefaultRates in rates.go matches them, and Pod Programs can change them.
 var premiumRates = []RateTier{
-	{1, int32(model.PossessionTypeCostume), model.RaritySSRare},
-	{1, int32(model.PossessionTypeWeapon), model.RaritySSRare},
+	{200, int32(model.PossessionTypeCostume), model.RaritySSRare},
+	{300, int32(model.PossessionTypeWeapon), model.RaritySSRare},
+	{500, int32(model.PossessionTypeCostume), model.RaritySRare},
+	{1000, int32(model.PossessionTypeWeapon), model.RaritySRare},
+	{8000, int32(model.PossessionTypeWeapon), model.RarityRare},
 }
 
 func DrawPremium(bp *masterdata.BannerPool, count int, fixedRarityMin int32, fixedCount int, rateMultiplier float64) []DrawnItem {
 	result := make([]DrawnItem, 0, count)
-	rates := adjustRates(premiumRates, rateMultiplier)
+	rates := adjustRates(Rates().Tiers(), rateMultiplier)
 	totalWeight := 0
 	for _, r := range rates {
 		totalWeight += r.Weight
@@ -157,7 +161,7 @@ func tryFeaturedRateUp(bp *masterdata.BannerPool, tier RateTier) (DrawnItem, boo
 	if len(matches) == 0 {
 		return DrawnItem{}, false
 	}
-	if rand.Intn(model.FeaturedRateUpDenom) >= model.FeaturedRateUpPercent {
+	if rand.Float64()*100 >= Rates().FeaturedPercent {
 		return DrawnItem{}, false
 	}
 	f := matches[rand.Intn(len(matches))]

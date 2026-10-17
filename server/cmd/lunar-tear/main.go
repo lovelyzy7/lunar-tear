@@ -6,9 +6,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"lunar-tear/server/internal/database"
+	"lunar-tear/server/internal/gacha"
 	"lunar-tear/server/internal/gametime"
 	"lunar-tear/server/internal/runtime"
 	"lunar-tear/server/internal/store/sqlite"
@@ -20,6 +22,14 @@ func masterDataPath() string {
 		return v
 	}
 	return "assets/release/20240404193219.bin.e"
+}
+
+// envOr returns the environment value of key, or fallback when it is unset.
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func main() {
@@ -50,6 +60,16 @@ func main() {
 	}
 	defer db.Close()
 	log.Printf("database opened: %s", *dbPath)
+
+	// The summon and roulette rates live next to the save: gacha_rates.json and
+	// roulette_rates.json in the database's folder, so the web panel can edit
+	// them and a running server picks a change up (both are polled by mtime).
+	ratesDir := filepath.Dir(*dbPath)
+	gachaRates := envOr("LUNAR_GACHA_RATES", filepath.Join(ratesDir, "gacha_rates.json"))
+	rouletteRates := envOr("LUNAR_ROULETTE_RATES", filepath.Join(ratesDir, "roulette_rates.json"))
+	gacha.SetRatesPath(gachaRates)
+	gacha.SetRouletteRatesPath(rouletteRates)
+	log.Printf("summon rates: %s | roulette rates: %s", gachaRates, rouletteRates)
 
 	userStore := sqlite.New(db, gametime.Now)
 
