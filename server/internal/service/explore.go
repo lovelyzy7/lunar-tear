@@ -4,18 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 
 	pb "lunar-tear/server/gen/proto"
 	"lunar-tear/server/internal/gametime"
-	"lunar-tear/server/internal/model"
 	"lunar-tear/server/internal/runtime"
 	"lunar-tear/server/internal/store"
-)
-
-const (
-	exploreStaminaRecovery  = 1000 // millivalue added on finish
-	exploreRewardMaterialId = 100001
-	exploreRewardBaseCount  = 1
 )
 
 type ExploreServiceServer struct {
@@ -40,21 +34,31 @@ func (s *ExploreServiceServer) StartExplore(ctx context.Context, req *pb.StartEx
 	userId := CurrentUserId(ctx, s.users, s.sessions)
 	nowMillis := gametime.NowMillis()
 
+	var short error
 	_, err := s.users.UpdateUser(userId, func(user *store.UserState) {
 		explore := catalog.Explores[req.ExploreId]
-		if req.UseConsumableItemId > 0 && explore.ConsumeItemCount > 0 {
+		// Playing again within the waiting time (or on hard) takes Explorer's Tickets.
+		usesTicket := req.UseConsumableItemId > 0 && explore.ConsumeItemCount > 0
+		if usesTicket {
 			cur := user.ConsumableItems[req.UseConsumableItemId]
+			if cur < explore.ConsumeItemCount {
+				short = fmt.Errorf("explore id=%d needs %d of item %d, have %d", req.ExploreId, explore.ConsumeItemCount, req.UseConsumableItemId, cur)
+				return
+			}
 			user.ConsumableItems[req.UseConsumableItemId] = cur - explore.ConsumeItemCount
 			log.Printf("[ExploreService] StartExplore: consumed item=%d count=%d remaining=%d", req.UseConsumableItemId, explore.ConsumeItemCount, user.ConsumableItems[req.UseConsumableItemId])
 		}
 
 		user.Explore = store.ExploreState{
 			PlayingExploreId:   req.ExploreId,
-			IsUseExploreTicket: false,
+			IsUseExploreTicket: usesTicket,
 			LatestPlayDatetime: nowMillis,
 			LatestVersion:      nowMillis,
 		}
 	})
+	if err == nil {
+		err = short
+	}
 	if err != nil {
 		return nil, fmt.Errorf("start explore: %w", err)
 	}
@@ -65,7 +69,8 @@ func (s *ExploreServiceServer) StartExplore(ctx context.Context, req *pb.StartEx
 func (s *ExploreServiceServer) FinishExplore(ctx context.Context, req *pb.FinishExploreRequest) (*pb.FinishExploreResponse, error) {
 	log.Printf("[ExploreService] FinishExplore: exploreId=%d score=%d", req.ExploreId, req.Score)
 
-	catalog := s.holder.Get().Explore
+	cat := s.holder.Get()
+	catalog := cat.Explore
 	explore, ok := catalog.Explores[req.ExploreId]
 	if !ok {
 		return nil, fmt.Errorf("explore id=%d not found", req.ExploreId)
@@ -76,7 +81,9 @@ func (s *ExploreServiceServer) FinishExplore(ctx context.Context, req *pb.Finish
 	userId := CurrentUserId(ctx, s.users, s.sessions)
 	nowMillis := gametime.NowMillis()
 
-	rewardCount := int32(exploreRewardBaseCount) * explore.RewardLotteryCount
+	rank := exploreGradeRank(catalog, req.ExploreId, req.Score)
+	stamina := exploreStamina(rank)
+	var rewards []*pb.ExploreReward
 
 	_, err := s.users.UpdateUser(userId, func(user *store.UserState) {
 		existing, exists := user.ExploreScores[req.ExploreId]
@@ -96,28 +103,21 @@ func (s *ExploreServiceServer) FinishExplore(ctx context.Context, req *pb.Finish
 			LatestVersion:      nowMillis,
 		}
 
-		user.Status.StaminaMilliValue += exploreStaminaRecovery
-		user.Status.StaminaUpdateDatetime = nowMillis
+		// Settle natural regeneration up to now before adding the reward, so
+		// the time since the last stamina update is not lost.
+		store.RecoverStamina(user, stamina*1000, cat.Shop.MaxStaminaMillis[user.Status.Level], nowMillis)
 		user.Status.LatestVersion = nowMillis
-		log.Printf("[ExploreService] FinishExplore: stamina +%d -> %d", exploreStaminaRecovery, user.Status.StaminaMilliValue)
+		log.Printf("[ExploreService] FinishExplore: grade %d, stamina +%d -> %d", rank, stamina, user.Status.StaminaMilliValue)
 
-		user.Materials[exploreRewardMaterialId] += rewardCount
-		log.Printf("[ExploreService] FinishExplore: granted material=%d count=%d", exploreRewardMaterialId, rewardCount)
+		rewards = exploreDraws(user, cat.GameConfig.ConsumableItemIdForGold, rank, explore.RewardLotteryCount, rand.Intn)
+		log.Printf("[ExploreService] FinishExplore: %d draws, %d rewards", explore.RewardLotteryCount, len(rewards))
 	})
 	if err != nil {
 		return nil, fmt.Errorf("finish explore: %w", err)
 	}
 
-	rewards := []*pb.ExploreReward{
-		{
-			PossessionType: int32(model.PossessionTypeMaterial),
-			PossessionId:   exploreRewardMaterialId,
-			Count:          rewardCount,
-		},
-	}
-
 	return &pb.FinishExploreResponse{
-		AcquireStaminaCount: exploreStaminaRecovery,
+		AcquireStaminaCount: stamina,
 		ExploreReward:       rewards,
 		AssetGradeIconId:    assetGradeIconId,
 	}, nil

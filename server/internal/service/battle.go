@@ -6,6 +6,7 @@ import (
 
 	pb "lunar-tear/server/gen/proto"
 	"lunar-tear/server/internal/gametime"
+	"lunar-tear/server/internal/questflow"
 	"lunar-tear/server/internal/store"
 )
 
@@ -28,6 +29,7 @@ func (s *BattleServiceServer) StartWave(ctx context.Context, req *pb.StartWaveRe
 		user.Battle.LastStartedAt = gametime.NowMillis()
 		user.Battle.LastUserPartyCount = int32(len(req.UserPartyInitialInfoList))
 		user.Battle.LastNpcPartyCount = int32(len(req.NpcPartyInitialInfoList))
+		questflow.RecordStartWave(user, req.UserPartyInitialInfoList)
 	})
 	return &pb.StartWaveResponse{}, nil
 }
@@ -44,6 +46,8 @@ func (s *BattleServiceServer) FinishWave(ctx context.Context, req *pb.FinishWave
 		user.Battle.LastNpcPartyCount = int32(len(req.NpcPartyResultInfoList))
 		user.Battle.LastBattleBinarySize = int32(len(req.BattleBinary))
 		user.Battle.LastElapsedFrameCount = req.ElapsedFrameCount
+		// Quest missions are judged against these stats at the finish.
+		questflow.RecordFinishWave(user, req.BattleDetail)
 	})
 	return &pb.FinishWaveResponse{}, nil
 }

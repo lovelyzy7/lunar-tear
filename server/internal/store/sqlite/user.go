@@ -3,7 +3,11 @@ package sqlite
 import (
 	"database/sql"
 	"fmt"
+	"log"
+	"sync"
+	"time"
 
+	"lunar-tear/server/internal/gametime"
 	"lunar-tear/server/internal/model"
 	"lunar-tear/server/internal/store"
 )
@@ -79,6 +83,7 @@ func (s *SQLiteStore) ImportUser(u *store.UserState) error {
 
 	// Child tables in reverse-dependency order (matches schema's goose Down).
 	childTables := []string{
+		"user_bunker_ext",
 		"user_event_quest_labyrinth_stages",
 		"user_event_quest_labyrinth_seasons",
 		"user_event_quest_tower_accumulation_rewards",
@@ -239,13 +244,45 @@ func (s *SQLiteStore) UpdateUUID(userId int64, newUuid string) error {
 	return nil
 }
 
+// userLocks serializes UpdateUser per player: each call reads the save,
+// mutates it and writes the difference, so two requests for the same player
+// running at once (the client sends some in parallel, and the interceptors
+// update the save after each handler) could otherwise lose one's changes.
+var userLocks sync.Map // userLockKey -> chan struct{} (capacity 1)
+
+type userLockKey struct {
+	s      *SQLiteStore
+	userId int64
+}
+
+// userLockWait bounds the wait for another update of the same player. A
+// mutate that (by mistake) updates its own player again would otherwise
+// deadlock; after the wait it goes ahead unserialized, as before the lock.
+const userLockWait = 10 * time.Second
+
+func (s *SQLiteStore) lockUser(userId int64) (unlock func()) {
+	v, _ := userLocks.LoadOrStore(userLockKey{s, userId}, make(chan struct{}, 1))
+	ch := v.(chan struct{})
+	select {
+	case ch <- struct{}{}:
+		return func() { <-ch }
+	case <-time.After(userLockWait):
+		log.Printf("[store] user %d: update still waiting after %v, going ahead without the lock", userId, userLockWait)
+		return func() {}
+	}
+}
+
 func (s *SQLiteStore) UpdateUser(userId int64, mutate func(*store.UserState)) (store.UserState, error) {
-	before, err := s.LoadUser(userId)
+	unlock := s.lockUser(userId)
+	defer unlock()
+	before, err := s.loadStored(userId)
 	if err != nil {
 		return store.UserState{}, err
 	}
 
 	after := store.CloneUserState(before)
+	// Saved so the upgraded day and week keys replace the old ones.
+	store.UpgradeTimeKeys(&after, gametime.NowMillis())
 	mutate(&after)
 
 	tx, err := s.db.Begin()

@@ -19,6 +19,7 @@ func CloneUserState(u UserState) UserState {
 	out.QuestMissions = maps.Clone(u.QuestMissions)
 	out.WeaponStories = maps.Clone(u.WeaponStories)
 	out.Missions = maps.Clone(u.Missions)
+	out.Ext = u.Ext.Clone()
 	out.Gimmick = GimmickState{
 		Progress:         maps.Clone(u.Gimmick.Progress),
 		OrnamentProgress: maps.Clone(u.Gimmick.OrnamentProgress),

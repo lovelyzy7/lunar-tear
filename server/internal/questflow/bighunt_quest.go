@@ -14,10 +14,11 @@ func (h *QuestHandler) HandleBigHuntQuestStart(user *store.UserState, questId, u
 	}
 
 	h.initQuestState(user, questId)
+	ResetBattleStats(user)
 
 	if quest.Stamina > 0 {
 		maxMillis := h.MaxStaminaByLevel[user.Status.Level] * 1000
-		stamina := h.staminaWithCampaign(quest.Stamina, h.targetForBigHunt(questId), nowMillis)
+		stamina := h.staminaWithCampaign(user, quest.Stamina, h.targetForBigHunt(questId), nowMillis)
 		store.ConsumeStamina(user, stamina, maxMillis, nowMillis)
 	}
 
@@ -37,18 +38,20 @@ func (h *QuestHandler) HandleBigHuntQuestFinish(user *store.UserState, questId i
 	target := h.targetForBigHunt(questId)
 	var outcome FinishOutcome
 	if !isRetired && !isAnnihilated {
-		outcome = h.evaluateFinishOutcome(user, questId, target, nowMillis)
+		outcome = h.evaluateFinishOutcome(user, questId, target, false, nowMillis)
 		h.applyQuestVictory(user, questId, &outcome, nowMillis, false)
 	}
 
-	consumed := h.staminaWithCampaign(quest.Stamina, target, nowMillis)
+	consumed := h.staminaWithCampaign(user, quest.Stamina, target, nowMillis)
 	if isRetired && !isAnnihilated && consumed > 1 {
 		refund := consumed - 1
 		maxMillis := h.MaxStaminaByLevel[user.Status.Level] * 1000
 		store.RecoverStamina(user, refund*1000, maxMillis, nowMillis)
 	}
 
-	h.clearQuestMissions(user, questId, nowMillis)
+	if isRetired || isAnnihilated {
+		settleLostQuestState(user, questId)
+	}
 
 	return outcome
 }

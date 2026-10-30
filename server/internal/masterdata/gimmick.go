@@ -26,7 +26,7 @@ type gimmickScheduleEntry struct {
 	EndDatetime     int64
 	FirstSequenceId int32
 	RequiredQuestId int32 // 0 = always active
-	IsHidden        bool  // hidden-story or cage-memory gimmick: bypasses the quest gate
+	IsHidden        bool  // hidden-story or cage-memory gimmick
 	Rank            int   // trim priority — see gimmickTypeRank
 }
 
@@ -135,6 +135,7 @@ type GimmickCatalog struct {
 	gimmickTypes      map[int32]model.GimmickType
 	cageMemoryItems   map[int32]int32 // CageMemory GimmickId -> ImportantItemId (type 4)
 	hiddenBirdRewards map[GimmickOrnamentRef]SequenceReward
+	releaseConditions map[int32]*gimmickCondition // GimmickId -> ReleaseEvaluateConditionId
 }
 
 func LoadGimmickCatalog(resolver *ConditionResolver, cageOrnaments *CageOrnamentCatalog) (*GimmickCatalog, error) {
@@ -222,6 +223,7 @@ func LoadGimmickCatalog(resolver *ConditionResolver, cageOrnaments *CageOrnament
 		gimmickTypes:      gimmickTypes().byGimmick,
 		cageMemoryItems:   cageMemoryItems,
 		hiddenBirdRewards: hiddenBirdRewards,
+		releaseConditions: loadGimmickReleaseConditions(),
 	}, nil
 }
 
@@ -459,7 +461,9 @@ func (c *GimmickCatalog) ActiveScheduleKeys(user store.UserState, nowMillis int6
 		if nowMillis < s.StartDatetime {
 			continue // future schedules still skipped
 		}
-		if !s.IsHidden && s.RequiredQuestId != 0 {
+		// Every schedule's QUEST_CLEAR release condition applies, Hidden
+		// Stories and Lost Archives included.
+		if s.RequiredQuestId != 0 {
 			q, ok := user.Quests[s.RequiredQuestId]
 			if !ok || q.QuestStateType != model.UserQuestStateTypeCleared {
 				continue

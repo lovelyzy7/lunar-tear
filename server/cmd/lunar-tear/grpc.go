@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"time"
 
 	pb "lunar-tear/server/gen/proto"
 	"lunar-tear/server/internal/interceptor"
@@ -12,6 +13,7 @@ import (
 	"lunar-tear/server/internal/store"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 )
 
@@ -48,11 +50,19 @@ func startGRPC(
 	lis = loggingListener{Listener: lis}
 
 	diffInterceptor := interceptor.NewDiffInterceptor(userStore, userStore)
-	grpcServer := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(interceptor.Platform, interceptor.Logging, diffInterceptor, interceptor.TimeSync),
+	// TODO(diag): remove the DiagServerOptions() spread to roll back the
+	// diagnostic unknown-method/stats logging (internal/interceptor/diag.go).
+	// It is a no-op unless built with -tags diag.
+	serverOpts := []grpc.ServerOption{
+		// Accept keepalive pings down to 1s apart, also between calls, instead of closing the connection (gRPC default: 5 min).
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: time.Second, PermitWithoutStream: true}),
+		grpc.ChainUnaryInterceptor(interceptor.Recover, interceptor.Platform, interceptor.Logging, diffInterceptor, interceptor.NewMissionInterceptor(userStore, userStore), interceptor.TimeSync),
 		grpc.UnknownServiceHandler(interceptor.UnknownService),
-	)
+	}
+	serverOpts = append(serverOpts, interceptor.DiagServerOptions()...)
+	grpcServer := grpc.NewServer(serverOpts...)
 
+	service.InitBunker(holder)
 	registerServices(grpcServer, publicAddr, octoURL, authURL, userStore, holder, noRegister)
 
 	reflection.Register(grpcServer)
@@ -87,15 +97,15 @@ func registerServices(
 	pubHost, pubPortStr, _ := net.SplitHostPort(publicAddr)
 	pubPort, _ := strconv.Atoi(pubPortStr)
 
-	pb.RegisterBannerServiceServer(srv, service.NewBannerServiceServer(holder))
+	pb.RegisterBannerServiceServer(srv, service.NewBannerServiceServer(userStore, userStore, holder))
 	pb.RegisterUserServiceServer(srv, service.NewUserServiceServer(userStore, userStore, holder, authURL, noRegister))
 	pb.RegisterBattleServiceServer(srv, service.NewBattleServiceServer(userStore, userStore))
 	pb.RegisterConfigServiceServer(srv, service.NewConfigServiceServer(pubHost, int32(pubPort), octoURL))
 	pb.RegisterDataServiceServer(srv, service.NewDataServiceServer(userStore, userStore))
 	pb.RegisterTutorialServiceServer(srv, service.NewTutorialServiceServer(userStore, userStore, holder))
 	pb.RegisterGachaServiceServer(srv, service.NewGachaServiceServer(userStore, userStore, holder))
-	pb.RegisterGiftServiceServer(srv, service.NewGiftServiceServer(userStore, userStore))
-	pb.RegisterGamePlayServiceServer(srv, service.NewGameplayServiceServer())
+	pb.RegisterGiftServiceServer(srv, service.NewGiftServiceServer(userStore, userStore, holder))
+	pb.RegisterGamePlayServiceServer(srv, service.NewGameplayServiceServer(userStore, userStore, holder))
 	pb.RegisterGimmickServiceServer(srv, service.NewGimmickServiceServer(userStore, userStore, holder))
 	pb.RegisterQuestServiceServer(srv, service.NewQuestServiceServer(userStore, userStore, holder))
 	pb.RegisterNotificationServiceServer(srv, service.NewNotificationServiceServer(userStore, userStore))
@@ -109,6 +119,7 @@ func registerServices(
 	pb.RegisterPortalCageServiceServer(srv, service.NewPortalCageServiceServer(userStore, userStore))
 	pb.RegisterCharacterViewerServiceServer(srv, service.NewCharacterViewerServiceServer(userStore, userStore, holder))
 	pb.RegisterMissionServiceServer(srv, service.NewMissionServiceServer(userStore, userStore))
+	pb.RegisterPvpServiceServer(srv, service.NewPvpServiceServer(userStore, userStore, holder))
 	pb.RegisterShopServiceServer(srv, service.NewShopServiceServer(userStore, userStore, holder))
 	pb.RegisterCostumeServiceServer(srv, service.NewCostumeServiceServer(userStore, userStore, holder))
 	pb.RegisterMovieServiceServer(srv, service.NewMovieServiceServer(userStore, userStore))
@@ -125,6 +136,5 @@ func registerServices(
 	pb.RegisterBigHuntServiceServer(srv, service.NewBigHuntServiceServer(userStore, userStore, holder))
 	pb.RegisterRewardServiceServer(srv, service.NewRewardServiceServer(userStore, userStore, holder))
 	pb.RegisterLabyrinthServiceServer(srv, service.NewLabyrinthServiceServer(userStore, userStore, holder))
-	pb.RegisterIndividualpopServiceServer(srv, service.NewIndividualpopServiceServer())
-	pb.RegisterPvpServiceServer(srv, service.NewPvpServiceServer())
+	pb.RegisterIndividualPopServiceServer(srv, service.NewIndividualPopServiceServer())
 }

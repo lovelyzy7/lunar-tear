@@ -120,9 +120,12 @@ type UserState struct {
 	AutoSaleSettings            map[int32]AutoSaleSettingState
 	CharacterRebirths           map[int32]CharacterRebirthState
 	QuestAutoOrbit              QuestAutoOrbitState
+
+	Ext ExtState
 }
 
 func (u *UserState) EnsureMaps() {
+	u.Ext.EnsureMaps()
 	if u.Tutorials == nil {
 		u.Tutorials = make(map[int32]TutorialProgressState)
 	}
@@ -1077,6 +1080,17 @@ type GachaPromotionItem struct {
 	BonusPossessionId   int32
 }
 
+// GachaBoxContent is one item of a box summon's box: Count of it per box;
+// IsTarget items are the box's prize, and drawing them all lets the box be
+// reset early.
+type GachaBoxContent struct {
+	PossessionType int32
+	PossessionId   int32
+	RarityType     int32
+	Count          int32
+	IsTarget       bool
+}
+
 type GachaBannerState struct {
 	GachaId       int32
 	MedalCount    int32
@@ -1088,6 +1102,7 @@ type GachaBannerState struct {
 }
 
 type GachaCatalogEntry struct {
+	BoxContents                []GachaBoxContent // box summons: what one box holds
 	GachaId                    int32
 	GachaLabelType             int32
 	GachaModeType              int32
@@ -1113,6 +1128,8 @@ type GachaCatalogEntry struct {
 	PromotionItems             []GachaPromotionItem
 	DescriptionTextId          int32
 	MaxStepNumber              int32
+	UnlockConditionType        int32 // GachaUnlockConditionType
+	UnlockConditionValue       int32 // quest id for MAIN_QUEST_CLEAR
 }
 
 type CharacterBoardState struct {

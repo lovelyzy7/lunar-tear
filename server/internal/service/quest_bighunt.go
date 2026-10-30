@@ -1,8 +1,10 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"log"
+	"slices"
 
 	pb "lunar-tear/server/gen/proto"
 	"lunar-tear/server/internal/gametime"
@@ -60,6 +62,10 @@ func (s *BigHuntServiceServer) StartBigHuntQuest(ctx context.Context, req *pb.St
 		}
 
 		user.BigHuntDeckNumber = req.UserDeckNumber
+		// A new run starts with no saved waves; RestartBigHuntQuest resumes
+		// from them.
+		user.BigHuntBattleBinary = nil
+		user.BigHuntBattleDetail = store.BigHuntBattleDetail{}
 
 		st := user.BigHuntStatuses[req.BigHuntBossQuestId]
 		if st.LatestChallengeDatetime < today {
@@ -146,7 +152,7 @@ func (s *BigHuntServiceServer) FinishBigHuntQuest(ctx context.Context, req *pb.F
 		}
 
 		schedKey := store.BigHuntScheduleScoreKey{
-			BigHuntScheduleId: catalog.ActiveScheduleId,
+			BigHuntScheduleId: catalog.ScheduleAt(gametime.NowMillis()),
 			BigHuntBossId:     bossQuest.BigHuntBossId,
 		}
 		oldSchedMax := user.BigHuntScheduleMaxScores[schedKey].MaxScore
@@ -185,20 +191,15 @@ func (s *BigHuntServiceServer) FinishBigHuntQuest(ctx context.Context, req *pb.F
 			AssetGradeIconId:      assetGradeIconId,
 		}
 
-		if isHighScore {
-			rewardGroupId := catalog.ResolveActiveScoreRewardGroupId(
-				bossQuest.BigHuntScoreRewardGroupScheduleId, nowMillis)
-			if rewardGroupId > 0 {
-				newItems := catalog.CollectNewRewards(rewardGroupId, oldSchedMax, userScore)
-				for _, item := range newItems {
-					engine.Granter.GrantFull(user, model.PossessionType(item.PossessionType), item.PossessionId, item.Count, nowMillis)
-					scoreRewards = append(scoreRewards, &pb.BigHuntReward{
-						PossessionType: item.PossessionType,
-						PossessionId:   item.PossessionId,
-						Count:          item.Count,
-					})
-				}
-			}
+		// Every finished run pays the one score tier its score reaches.
+		rewardGroupId := catalog.ResolveActiveScoreRewardGroupId(bossQuest.BigHuntScoreRewardGroupScheduleId, nowMillis)
+		for _, item := range catalog.TierRewards(rewardGroupId, userScore) {
+			engine.Granter.GrantFull(user, model.PossessionType(item.PossessionType), item.PossessionId, item.Count, nowMillis)
+			scoreRewards = append(scoreRewards, &pb.BigHuntReward{
+				PossessionType: item.PossessionType,
+				PossessionId:   item.PossessionId,
+				Count:          item.Count,
+			})
 		}
 
 		if len(detail.CostumeBattleInfo) > 0 {
@@ -324,13 +325,14 @@ func (s *BigHuntServiceServer) SkipBigHuntQuest(ctx context.Context, req *pb.Ski
 			return
 		}
 		maxScore := user.BigHuntScheduleMaxScores[store.BigHuntScheduleScoreKey{
-			BigHuntScheduleId: catalog.ActiveScheduleId,
+			BigHuntScheduleId: catalog.ScheduleAt(gametime.NowMillis()),
 			BigHuntBossId:     bossQuest.BigHuntBossId,
 		}].MaxScore
 		if maxScore <= 0 {
 			return
 		}
-		items := catalog.CollectNewRewards(rewardGroupId, 0, maxScore)
+		// Each skip pays the tier of the best score this schedule.
+		items := catalog.TierRewards(rewardGroupId, maxScore)
 		for n := int32(0); n < req.SkipCount; n++ {
 			for _, item := range items {
 				granter.GrantFull(user, model.PossessionType(item.PossessionType), item.PossessionId, item.Count, nowMillis)
@@ -367,6 +369,13 @@ func (s *BigHuntServiceServer) SaveBigHuntBattleInfo(ctx context.Context, req *p
 	}
 
 	s.users.UpdateUser(userId, func(user *store.UserState) {
+		// The client saves after every wave (CalculatorTurnBattleApiRequestBigHunt
+		// .RequestFinishWaveAsync) with that wave's stats; the request names no
+		// wave, so a resend is recognised by its unchanged battle snapshot.
+		if len(req.BattleBinary) > 0 && bytes.Equal(req.BattleBinary, user.BigHuntBattleBinary) {
+			log.Printf("[BigHuntService] SaveBigHuntBattleInfo: wave already saved, ignored")
+			return
+		}
 		user.BigHuntBattleBinary = req.BattleBinary
 
 		if req.BigHuntBattleDetail != nil {
@@ -392,13 +401,14 @@ func (s *BigHuntServiceServer) SaveBigHuntBattleInfo(ctx context.Context, req *p
 					RandomDisplayValue:     rdValue,
 				})
 			}
+			prev := user.BigHuntBattleDetail
 			user.BigHuntBattleDetail = store.BigHuntBattleDetail{
 				DeckType:             req.BigHuntBattleDetail.DeckType,
 				UserTripleDeckNumber: req.BigHuntBattleDetail.UserTripleDeckNumber,
-				BossKnockDownCount:   req.BigHuntBattleDetail.BossKnockDownCount,
-				MaxComboCount:        req.BigHuntBattleDetail.MaxComboCount,
-				TotalDamage:          totalDamage,
-				CostumeBattleInfo:    append(existingCostumes, newCostumes...),
+				BossKnockDownCount:   prev.BossKnockDownCount + req.BigHuntBattleDetail.BossKnockDownCount,
+				MaxComboCount:        max(prev.MaxComboCount, req.BigHuntBattleDetail.MaxComboCount),
+				TotalDamage:          prev.TotalDamage + totalDamage,
+				CostumeBattleInfo:    append(slices.Clone(existingCostumes), newCostumes...),
 			}
 		}
 
@@ -504,7 +514,10 @@ func resolveBigHuntWeeklyRewards(catalog *masterdata.BigHuntCatalog, user store.
 			AttributeType:        boss.AttributeType,
 		}
 		maxScore := user.BigHuntWeeklyMaxScores[weekKey].MaxScore
-		for _, item := range catalog.CollectNewRewards(rewardGroupId, 0, maxScore) {
+		if maxScore <= 0 {
+			continue
+		}
+		for _, item := range catalog.TierRewards(rewardGroupId, maxScore) {
 			rewards = append(rewards, &pb.BigHuntReward{
 				PossessionType: item.PossessionType,
 				PossessionId:   item.PossessionId,

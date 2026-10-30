@@ -187,7 +187,7 @@ func (s *PartsServiceServer) Enhance(ctx context.Context, req *pb.PartsEnhanceRe
 			PartsId:      part.PartsId,
 			PartsGroupId: partDef.PartsGroupId,
 			Rarity:       model.RarityType(partDef.RarityType),
-		}, campaign.Filter{NowMillis: nowMillis, UserStatus: campaign.TargetUserStatusAll}).Apply(baseRate)
+		}, campaign.FilterFor(user, nowMillis)).Apply(baseRate)
 
 		if rand.Intn(1000) < int(successRate) {
 			part.Level++

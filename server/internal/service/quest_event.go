@@ -10,6 +10,8 @@ import (
 	"lunar-tear/server/internal/questflow"
 	"lunar-tear/server/internal/store"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -20,10 +22,18 @@ func (s *QuestServiceServer) StartEventQuest(ctx context.Context, req *pb.StartE
 	engine := s.holder.Get().QuestHandler
 	userId := CurrentUserId(ctx, s.users, s.sessions)
 	nowMillis := gametime.NowMillis()
+	var deckErr error
 	s.users.UpdateUser(userId, func(user *store.UserState) {
+		if deckErr = engine.CheckLimitContentDeck(user, req.EventQuestChapterId, req.QuestId, req.UserDeckNumber, nowMillis); deckErr != nil {
+			return
+		}
 		engine.HandleEventQuestStart(user, req.EventQuestChapterId, req.QuestId, req.IsBattleOnly, req.UserDeckNumber, nowMillis)
 		startAutoOrbit(user, model.QuestTypeEvent, req.EventQuestChapterId, req.QuestId, req.MaxAutoOrbitCount, nowMillis)
 	})
+	if deckErr != nil {
+		log.Printf("[QuestService] StartEventQuest refused: %v", deckErr)
+		return nil, status.Error(codes.FailedPrecondition, deckErr.Error())
+	}
 
 	drops := engine.BattleDropRewards(req.QuestId)
 	pbDrops := make([]*pb.BattleDropReward, len(drops))

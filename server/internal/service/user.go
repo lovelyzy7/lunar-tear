@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -20,7 +22,9 @@ import (
 	"github.com/google/uuid"
 
 	pb "lunar-tear/server/gen/proto"
+	"lunar-tear/server/internal/campaign"
 	"lunar-tear/server/internal/gametime"
+	"lunar-tear/server/internal/missions"
 	"lunar-tear/server/internal/model"
 	"lunar-tear/server/internal/runtime"
 	"lunar-tear/server/internal/store"
@@ -72,6 +76,16 @@ func (s *UserServiceServer) Auth(ctx context.Context, req *pb.AuthUserRequest) (
 	log.Printf("[UserService] Auth REQ DUMP: %+v", req)
 
 	session, err := s.sessions.CreateSession(req.Uuid, 24*time.Hour)
+	if errors.Is(err, store.ErrNotFound) && !s.noRegister {
+		// The game registers only on its very first start. When the player that
+		// held this device's ID was set aside (Pod Programs: New player), start a
+		// new one here instead of failing the sign-in.
+		var userId int64
+		if userId, err = s.users.CreateUser(req.Uuid, platform); err == nil {
+			log.Printf("[UserService] Auth: new player for uuid=%s -> userId=%d", req.Uuid, userId)
+			session, err = s.sessions.CreateSession(req.Uuid, 24*time.Hour)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}
@@ -100,6 +114,23 @@ func (s *UserServiceServer) GameStart(ctx context.Context, _ *emptypb.Empty) (*p
 	userId := CurrentUserId(ctx, s.users, s.sessions)
 	s.users.UpdateUser(userId, func(user *store.UserState) {
 		user.GameStartDatetime = gametime.NowMillis()
+		calendarGameStart(user, user.GameStartDatetime)
+		campaign.JoinBeginner(user, user.GameStartDatetime)
+		if bunkerHolder != nil {
+			if cats := bunkerHolder.Get(); cats != nil && cats.GachaHandler != nil {
+				user.EnsureMaps()
+				// Conversions shown in the last session are done with.
+				user.Gacha.ConvertedGachaMedal = store.ConvertedGachaMedalState{}
+				autoConvertExpiredMedals(user, cats.GachaEntries, cats.GachaHandler, user.GameStartDatetime)
+			}
+		}
+		// Limited stock whose day, week or month has ended is full again; the
+		// client shows stock from BoughtCount alone, so it must be reset here.
+		if bunkerHolder != nil {
+			if cats := bunkerHolder.Get(); cats != nil && cats.Shop != nil {
+				resetShopStock(cats.Shop, user, user.GameStartDatetime)
+			}
+		}
 	})
 
 	return &pb.GameStartResponse{}, nil
@@ -161,50 +192,71 @@ func (s *UserServiceServer) GetUserProfile(ctx context.Context, req *pb.GetUserP
 	if userId == 0 {
 		userId = CurrentUserId(ctx, s.users, s.sessions)
 	}
+	if profile := s.cpuProfile(ctx, userId); profile != nil {
+		return profile, nil
+	}
 	user, err := s.users.LoadUser(userId)
 	if err != nil {
 		return &pb.GetUserProfileResponse{}, nil
 	}
 
-	deckCharacters := []*pb.ProfileDeckCharacter{}
-	if deck, ok := user.Decks[store.DeckKey{DeckType: model.DeckTypeQuest, UserDeckNumber: 1}]; ok && deck.UserDeckCharacterUuid01 != "" {
-		if deckCharacter, ok := user.DeckCharacters[deck.UserDeckCharacterUuid01]; ok {
-			costumeId := int32(0)
-			if costume, ok := user.Costumes[deckCharacter.UserCostumeUuid]; ok {
-				costumeId = costume.CostumeId
-			}
-			mainWeaponId := int32(0)
-			mainWeaponLevel := int32(0)
-			if weapon, ok := user.Weapons[deckCharacter.MainUserWeaponUuid]; ok {
-				mainWeaponId = weapon.WeaponId
-				mainWeaponLevel = weapon.Level
-			}
-			deckCharacters = append(deckCharacters, &pb.ProfileDeckCharacter{
-				CostumeId:       costumeId,
-				MainWeaponId:    mainWeaponId,
-				MainWeaponLevel: mainWeaponLevel,
-			})
-		}
-	}
-
+	deck := latestUsedDeck(&user)
 	return &pb.GetUserProfileResponse{
 		Level:             user.Status.Level,
 		Name:              user.Profile.Name,
 		FavoriteCostumeId: user.Profile.FavoriteCostumeId,
 		Message:           user.Profile.Message,
 		IsFriend:          false,
-		LatestUsedDeck: &pb.ProfileDeck{
-			Power:         100,
-			DeckCharacter: deckCharacters,
-		},
-		PvpInfo: &pb.ProfilePvpInfo{},
-		GamePlayHistory: &pb.GamePlayHistory{
-			HistoryItem:              []*pb.PlayHistoryItem{},
-			HistoryCategoryGraphItem: []*pb.PlayHistoryCategoryGraphItem{},
-		},
+		LatestUsedDeck:    deck,
+		PvpInfo:           pvpProfileInfo(user),
+		GamePlayHistory:   playHistory(&user),
 	}, nil
 }
 
+
+// playHistory is the profile's play history counters. The Greed/Vice/Mania/Zeal
+// graph (historyCategoryGraphItem) is left empty: how the game weighs it is not known.
+func playHistory(u *store.UserState) *pb.GamePlayHistory {
+	h := &pb.GamePlayHistory{HistoryItem: []*pb.PlayHistoryItem{}, HistoryCategoryGraphItem: []*pb.PlayHistoryCategoryGraphItem{}}
+	if cat := missions.Current(); cat != nil {
+		h.HistoryItem = cat.PlayHistory(u)
+	}
+	return h
+}
+
+// latestUsedDeck is the profile card's deck: the deck of the player's last
+// battle (recorded from FinishWave), else the deck of the quest started last,
+// with its three members and its power.
+func latestUsedDeck(u *store.UserState) *pb.ProfileDeck {
+	key := store.DeckKey{DeckType: model.DeckType(u.Ext.LastDeck.DeckType), UserDeckNumber: u.Ext.LastDeck.UserDeckNumber}
+	if _, ok := u.Decks[key]; !ok {
+		var latest int64
+		number := int32(1)
+		for _, q := range u.Quests {
+			if q.UserDeckNumber != 0 && q.LatestStartDatetime > latest {
+				latest, number = q.LatestStartDatetime, q.UserDeckNumber
+			}
+		}
+		key = store.DeckKey{DeckType: model.DeckTypeQuest, UserDeckNumber: number}
+	}
+	deck, ok := u.Decks[key]
+	if !ok {
+		return &pb.ProfileDeck{DeckCharacter: []*pb.ProfileDeckCharacter{}}
+	}
+	out := &pb.ProfileDeck{Power: deck.Power, DeckCharacter: []*pb.ProfileDeckCharacter{}}
+	for _, id := range []string{deck.UserDeckCharacterUuid01, deck.UserDeckCharacterUuid02, deck.UserDeckCharacterUuid03} {
+		dc, ok := u.DeckCharacters[id]
+		if id == "" || !ok {
+			continue
+		}
+		member := &pb.ProfileDeckCharacter{CostumeId: u.Costumes[dc.UserCostumeUuid].CostumeId}
+		if w, ok := u.Weapons[dc.MainUserWeaponUuid]; ok {
+			member.MainWeaponId, member.MainWeaponLevel = w.WeaponId, w.Level
+		}
+		out.DeckCharacter = append(out.DeckCharacter, member)
+	}
+	return out
+}
 func (s *UserServiceServer) SetBirthYearMonth(ctx context.Context, req *pb.SetBirthYearMonthRequest) (*pb.SetBirthYearMonthResponse, error) {
 	log.Printf("[UserService] SetBirthYearMonth: %d/%d", req.BirthYear, req.BirthMonth)
 	userId := CurrentUserId(ctx, s.users, s.sessions)
@@ -283,8 +335,18 @@ func (s *UserServiceServer) CheckTransferSetting(ctx context.Context, _ *emptypb
 	return &pb.CheckTransferSettingResponse{}, nil
 }
 
+// GetUserGamePlayNote is one play history counter; the smartphone's pedometer
+// asks for the distance walked in the Cage (missions.HistoryWalkDistance), in
+// meters as the client sends it (CageMeasurableValues.runningDistanceMeters).
 func (s *UserServiceServer) GetUserGamePlayNote(ctx context.Context, req *pb.GetUserGamePlayNoteRequest) (*pb.GetUserGamePlayNoteResponse, error) {
-	return &pb.GetUserGamePlayNoteResponse{}, nil
+	cat := missions.Current()
+	user, err := s.users.LoadUser(CurrentUserId(ctx, s.users, s.sessions))
+	if cat == nil || err != nil {
+		return &pb.GetUserGamePlayNoteResponse{}, nil
+	}
+	v := cat.HistoryValue(&user, req.GamePlayHistoryTypeId)
+	log.Printf("[UserService] GetUserGamePlayNote: type=%d value=%d", req.GamePlayHistoryTypeId, v)
+	return &pb.GetUserGamePlayNoteResponse{ProgressValue: int32(min(v, math.MaxInt32))}, nil
 }
 
 func (s *UserServiceServer) resolveAuthToken(token string) (facebookId int64, err error) {

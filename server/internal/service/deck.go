@@ -8,6 +8,9 @@ import (
 	"lunar-tear/server/internal/gametime"
 	"lunar-tear/server/internal/model"
 	"lunar-tear/server/internal/store"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type DeckServiceServer struct {
@@ -27,7 +30,16 @@ func (s *DeckServiceServer) UpdateName(ctx context.Context, req *pb.UpdateNameRe
 	s.users.UpdateUser(userId, func(user *store.UserState) {
 		deckKey := store.DeckKey{DeckType: model.DeckType(req.DeckType), UserDeckNumber: req.UserDeckNumber}
 		deck := user.Decks[deckKey]
-		deck.Name = req.Name
+		deck.DeckType = model.DeckType(req.DeckType)
+		deck.UserDeckNumber = req.UserDeckNumber
+		// An empty name is the "default name" state, not a custom name: seed it
+		// as "Deck N" so the client does not synthesize its localized fallback
+		// ("任务N"). Non-empty custom names are stored verbatim (never rewritten).
+		if req.Name == "" {
+			deck.Name = store.DefaultDeckName(req.UserDeckNumber)
+		} else {
+			deck.Name = req.Name
+		}
 		user.Decks[deckKey] = deck
 	})
 
@@ -38,6 +50,7 @@ func (s *DeckServiceServer) RefreshDeckPower(ctx context.Context, req *pb.Refres
 	log.Printf("[DeckService] RefreshDeckPower: deckType=%d deckNumber=%d", req.DeckType, req.UserDeckNumber)
 	userId := CurrentUserId(ctx, s.users, s.sessions)
 
+	missing := false
 	s.users.UpdateUser(userId, func(user *store.UserState) {
 		if req.DeckPower == nil {
 			log.Printf("[DeckService] RefreshDeckPower: deckPower is nil")
@@ -48,7 +61,8 @@ func (s *DeckServiceServer) RefreshDeckPower(ctx context.Context, req *pb.Refres
 		deckKey := store.DeckKey{DeckType: dt, UserDeckNumber: req.UserDeckNumber}
 		deck, ok := user.Decks[deckKey]
 		if !ok {
-			log.Fatalf("[DeckService] RefreshDeckPower: deck not found")
+			missing = true
+			return
 		}
 
 		deck.Power = req.DeckPower.Power
@@ -76,6 +90,10 @@ func (s *DeckServiceServer) RefreshDeckPower(ctx context.Context, req *pb.Refres
 			user.DeckTypeNotes[dt] = note
 		}
 	})
+	if missing {
+		// Lunar Tear exited the whole server here (log.Fatalf).
+		return nil, status.Errorf(codes.NotFound, "deck type %d number %d not found", req.DeckType, req.UserDeckNumber)
+	}
 
 	return &pb.RefreshDeckPowerResponse{}, nil
 }
@@ -222,7 +240,13 @@ func (s *DeckServiceServer) UpdateTripleDeckName(ctx context.Context, req *pb.Up
 		td := user.TripleDecks[key]
 		td.DeckType = model.DeckType(req.DeckType)
 		td.UserDeckNumber = req.UserDeckNumber
-		td.Name = req.Name
+		// Same default-name rule as UpdateName: empty means "default", never a
+		// custom name, so it is re-seeded as "Deck N".
+		if req.Name == "" {
+			td.Name = store.DefaultDeckName(req.UserDeckNumber)
+		} else {
+			td.Name = req.Name
+		}
 		td.LatestVersion = gametime.NowMillis()
 		user.TripleDecks[key] = td
 	})
@@ -279,7 +303,12 @@ func (s *DeckServiceServer) CopyDeck(ctx context.Context, req *pb.CopyDeckReques
 
 		toKey := store.DeckKey{DeckType: model.DeckType(req.ToDeckType), UserDeckNumber: req.ToUserDeckNumber}
 		deck := user.Decks[toKey]
-		deck.Name = srcName
+		// Keep the source's custom name verbatim. If the source was unnamed,
+		// keep the "Deck N" default ApplyDeckReplacement just seeded for the
+		// target instead of clobbering it with an empty name.
+		if srcName != "" {
+			deck.Name = srcName
+		}
 		user.Decks[toKey] = deck
 
 		resultType = 1

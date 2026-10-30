@@ -15,10 +15,11 @@ func (h *QuestHandler) HandleExtraQuestStart(user *store.UserState, questId, use
 	}
 
 	h.initQuestState(user, questId)
+	ResetBattleStats(user)
 
 	if quest.Stamina > 0 {
 		maxMillis := h.MaxStaminaByLevel[user.Status.Level] * 1000
-		stamina := h.staminaWithCampaign(quest.Stamina, h.targetForExtra(questId), nowMillis)
+		stamina := h.staminaWithCampaign(user, quest.Stamina, h.targetForExtra(questId), nowMillis)
 		store.ConsumeStamina(user, stamina, maxMillis, nowMillis)
 	}
 
@@ -44,24 +45,24 @@ func (h *QuestHandler) HandleExtraQuestFinish(user *store.UserState, questId int
 	target := h.targetForExtra(questId)
 	var outcome FinishOutcome
 	if !isRetired && !isAnnihilated {
-		outcome = h.evaluateFinishOutcome(user, questId, target, nowMillis)
+		outcome = h.evaluateFinishOutcome(user, questId, target, false, nowMillis)
 		h.applyQuestVictory(user, questId, &outcome, nowMillis, false)
 	}
 
-	consumed := h.staminaWithCampaign(quest.Stamina, target, nowMillis)
+	consumed := h.staminaWithCampaign(user, quest.Stamina, target, nowMillis)
 	if isRetired && !isAnnihilated && consumed > 1 {
 		refund := consumed - 1
 		maxMillis := h.MaxStaminaByLevel[user.Status.Level] * 1000
 		store.RecoverStamina(user, refund*1000, maxMillis, nowMillis)
 	}
 
-	restoreClearedAfterRetire(user, questId, isRetired)
+	if isRetired || isAnnihilated {
+		settleLostQuestState(user, questId)
+	}
 
 	user.ExtraQuest.CurrentQuestId = 0
 	user.ExtraQuest.CurrentQuestSceneId = 0
 	user.ExtraQuest.HeadQuestSceneId = 0
-
-	h.clearQuestMissions(user, questId, nowMillis)
 
 	return outcome
 }

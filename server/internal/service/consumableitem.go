@@ -53,6 +53,8 @@ func (s *ConsumableItemServiceServer) UseEffectItem(ctx context.Context, req *pb
 			case model.EffectTargetStaminaRecovery:
 				millis := store.ResolveStaminaEffectMillis(effect.EffectValueType, effect.EffectValue, maxStaminaMillis)
 				store.RecoverStamina(user, millis*req.Count, maxStaminaMillis, nowMillis)
+			case model.EffectTargetBattlePointRecovery:
+				recoverBattlePoints(user, effect.EffectValueType, effect.EffectValue, req.Count, nowMillis)
 			default:
 				log.Printf("[ConsumableItemService] UseEffectItem: unhandled effect targetType=%d valueType=%d value=%d itemId=%d",
 					effect.EffectTargetType, effect.EffectValueType, effect.EffectValue, req.ConsumableItemId)

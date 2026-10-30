@@ -46,7 +46,11 @@ func (s *RewardServiceServer) ReceiveBigHuntReward(ctx context.Context, _ *empty
 	s.users.UpdateUser(userId, func(user *store.UserState) {
 		for bossQuestId, bossQuest := range bhCatalog.BossQuestById {
 			st := user.BigHuntStatuses[bossQuestId]
-			if st.LastDailyRewardReceivedDayVersion >= today {
+			// Day-version keys name a day: `== today` means "already paid
+			// today". `>= today` would also swallow every later day when the
+			// key sits in the game clock's future (a real-time save or
+			// RewindLoop leftover).
+			if st.LastDailyRewardReceivedDayVersion == today {
 				continue
 			}
 			rewardGroupId := bhCatalog.ResolveActiveScoreRewardGroupId(bossQuest.BigHuntScoreRewardGroupScheduleId, nowMillis)
@@ -54,13 +58,13 @@ func (s *RewardServiceServer) ReceiveBigHuntReward(ctx context.Context, _ *empty
 				continue
 			}
 			maxScore := user.BigHuntScheduleMaxScores[store.BigHuntScheduleScoreKey{
-				BigHuntScheduleId: bhCatalog.ActiveScheduleId,
+				BigHuntScheduleId: bhCatalog.ScheduleAt(nowMillis),
 				BigHuntBossId:     bossQuest.BigHuntBossId,
 			}].MaxScore
 			if maxScore <= 0 {
 				continue
 			}
-			items := bhCatalog.CollectNewRewards(rewardGroupId, 0, maxScore)
+			items := bhCatalog.TierRewards(rewardGroupId, maxScore)
 			for _, item := range items {
 				granter.GrantFull(user, model.PossessionType(item.PossessionType), item.PossessionId, item.Count, nowMillis)
 			}
@@ -106,8 +110,11 @@ func (s *RewardServiceServer) ReceiveBigHuntReward(ctx context.Context, _ *empty
 					AttributeType:        boss.AttributeType,
 				}
 				maxScore := user.BigHuntWeeklyMaxScores[weekKey].MaxScore
+				if maxScore <= 0 {
+					continue
+				}
 
-				items := bhCatalog.CollectNewRewards(rewardGroupId, 0, maxScore)
+				items := bhCatalog.TierRewards(rewardGroupId, maxScore)
 				for _, item := range items {
 					granter.GrantFull(user, model.PossessionType(item.PossessionType), item.PossessionId, item.Count, nowMillis)
 					weeklyRewards = append(weeklyRewards, &pb.BigHuntReward{
@@ -137,26 +144,5 @@ func (s *RewardServiceServer) ReceiveBigHuntReward(ctx context.Context, _ *empty
 		WeeklyScoreReward:           weeklyRewards,
 		IsReceivedWeeklyScoreReward: isReceived,
 		LastWeekWeeklyScoreReward:   []*pb.BigHuntReward{},
-	}, nil
-}
-
-func (s *RewardServiceServer) ReceivePvpReward(ctx context.Context, _ *emptypb.Empty) (*pb.ReceivePvpRewardResponse, error) {
-	log.Printf("[RewardService] ReceivePvpReward (stub)")
-	return &pb.ReceivePvpRewardResponse{
-		DiffUserData: map[string]*pb.DiffData{},
-	}, nil
-}
-
-func (s *RewardServiceServer) ReceiveLabyrinthSeasonReward(ctx context.Context, _ *emptypb.Empty) (*pb.ReceiveLabyrinthSeasonRewardResponse, error) {
-	log.Printf("[RewardService] ReceiveLabyrinthSeasonReward (stub)")
-	return &pb.ReceiveLabyrinthSeasonRewardResponse{
-		DiffUserData: map[string]*pb.DiffData{},
-	}, nil
-}
-
-func (s *RewardServiceServer) ReceiveMissionPassRemainingReward(ctx context.Context, _ *emptypb.Empty) (*pb.ReceiveMissionPassRemainingRewardResponse, error) {
-	log.Printf("[RewardService] ReceiveMissionPassRemainingReward (stub)")
-	return &pb.ReceiveMissionPassRemainingRewardResponse{
-		DiffUserData: map[string]*pb.DiffData{},
 	}, nil
 }

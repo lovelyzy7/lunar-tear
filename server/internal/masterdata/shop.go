@@ -13,12 +13,26 @@ type ExchangeShopCell struct {
 	ShopItemId int32
 }
 
+// Dark.Generated.Type.AutoResetType (m_shop_item_limited_stock.ShopItemAutoResetType).
+const (
+	ShopAutoResetNone    int32 = 1
+	ShopAutoResetDaily   int32 = 2 // every ShopItemAutoResetPeriod days
+	ShopAutoResetMonthly int32 = 3 // every ShopItemAutoResetPeriod months
+)
+
+// ShopStockReset is when a limited stock refills.
+type ShopStockReset struct {
+	Type   int32 // ShopAutoReset*
+	Period int32
+}
+
 type ShopCatalog struct {
 	Items             map[int32]EntityMShopItem
 	Contents          map[int32][]EntityMShopItemContentPossession
 	Effects           map[int32][]EntityMShopItemContentEffect
 	MaxStaminaMillis  map[int32]int32              // level -> max stamina in millis
 	LimitedStock      map[int32]int32              // stock id -> max count
+	LimitedStockReset map[int32]ShopStockReset     // stock id -> refill schedule
 	ItemShopPool      []int32                      // shop item IDs for the replaceable item shop, sorted by cell sort order
 	ExchangeShopCells map[int32][]ExchangeShopCell // shopId -> sorted cells for exchange shops
 }
@@ -46,11 +60,12 @@ func LoadShopCatalog() (*ShopCatalog, error) {
 	}
 
 	catalog := &ShopCatalog{
-		Items:            make(map[int32]EntityMShopItem, len(items)),
-		Contents:         make(map[int32][]EntityMShopItemContentPossession, len(contents)),
-		Effects:          make(map[int32][]EntityMShopItemContentEffect, len(effects)),
-		MaxStaminaMillis: make(map[int32]int32, len(userLevels)),
-		LimitedStock:     make(map[int32]int32, len(stockRows)),
+		Items:             make(map[int32]EntityMShopItem, len(items)),
+		Contents:          make(map[int32][]EntityMShopItemContentPossession, len(contents)),
+		Effects:           make(map[int32][]EntityMShopItemContentEffect, len(effects)),
+		MaxStaminaMillis:  make(map[int32]int32, len(userLevels)),
+		LimitedStock:      make(map[int32]int32, len(stockRows)),
+		LimitedStockReset: make(map[int32]ShopStockReset, len(stockRows)),
 	}
 	for _, row := range items {
 		catalog.Items[row.ShopItemId] = row
@@ -66,6 +81,7 @@ func LoadShopCatalog() (*ShopCatalog, error) {
 	}
 	for _, row := range stockRows {
 		catalog.LimitedStock[row.ShopItemLimitedStockId] = row.MaxCount
+		catalog.LimitedStockReset[row.ShopItemLimitedStockId] = ShopStockReset{Type: row.ShopItemAutoResetType, Period: row.ShopItemAutoResetPeriod}
 	}
 
 	shops, err := utils.ReadTable[EntityMShop]("m_shop")

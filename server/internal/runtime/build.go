@@ -115,6 +115,10 @@ func buildCatalogs() (*Catalogs, error) {
 	}
 	log.Printf("costume catalog loaded: %d costumes, %d materials, %d rarity curves", len(costumeCatalog.Costumes), len(costumeCatalog.Materials), len(costumeCatalog.ExpByRarity))
 
+	if err := wireGranter(questHandler.Granter, gameConfig, costumeCatalog); err != nil {
+		return nil, err
+	}
+
 	weaponCatalog, err := masterdata.LoadWeaponCatalog(materialCatalog)
 	if err != nil {
 		return nil, fmt.Errorf("load weapon catalog: %w", err)

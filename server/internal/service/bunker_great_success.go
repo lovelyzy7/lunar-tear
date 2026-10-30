@@ -1,0 +1,29 @@
+package service
+
+import (
+	"log"
+	"math/rand"
+)
+
+// Great success. Costume and weapon enhancements could end in a "great
+// success" (the client has its own animation and the response flag), which
+// gave more experience. Its usual chance and size are not in the game data,
+// so these are chosen here: 10% of enhancements, half again the experience.
+// Glorious Success Rate Up campaigns raise the chance
+// (campaign.CostumeGreatSuccessBonus, WeaponGreatSuccessBonus).
+const (
+	greatSuccessBasePermil = 100
+	greatSuccessExpPermil  = 1500
+)
+
+// rollGreatSuccess decides one enhancement at ratePermil ‰; intn is rand.Intn.
+func rollGreatSuccess(exp, ratePermil int32, intn func(int) int) (int32, bool) {
+	if exp <= 0 || intn(1000) >= int(ratePermil) {
+		log.Printf("[Enhance] glorious success: no (chance %d‰)", ratePermil)
+		return exp, false
+	}
+	log.Printf("[Enhance] glorious success: yes (chance %d‰)", ratePermil)
+	return int32(int64(exp) * greatSuccessExpPermil / 1000), true
+}
+
+var greatSuccessRand = rand.Intn

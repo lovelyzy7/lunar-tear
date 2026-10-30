@@ -20,30 +20,11 @@ func NewFriendServiceServer(users store.UserRepository, sessions store.SessionRe
 	return &FriendServiceServer{users: users, sessions: sessions}
 }
 
-func (s *FriendServiceServer) GetUser(ctx context.Context, req *pb.GetUserRequest) (*pb.GetUserResponse, error) {
-	log.Printf("[FriendService] GetUser: playerId=%d", req.PlayerId)
-	return &pb.GetUserResponse{}, nil
-}
-
-func (s *FriendServiceServer) GetFriendList(ctx context.Context, req *pb.GetFriendListRequest) (*pb.GetFriendListResponse, error) {
-	log.Printf("[FriendService] GetFriendList")
-	return &pb.GetFriendListResponse{
-		FriendUser:         []*pb.FriendUser{},
-		SendCheerCount:     0,
-		ReceivedCheerCount: 0,
-	}, nil
-}
+// GetUser, GetFriendList and SearchRecommendedUsers are in bunker_friends.go.
 
 func (s *FriendServiceServer) GetFriendRequestList(ctx context.Context, req *emptypb.Empty) (*pb.GetFriendRequestListResponse, error) {
 	log.Printf("[FriendService] GetFriendRequestList")
 	return &pb.GetFriendRequestListResponse{
 		User: []*pb.User{},
-	}, nil
-}
-
-func (s *FriendServiceServer) SearchRecommendedUsers(ctx context.Context, req *emptypb.Empty) (*pb.SearchRecommendedUsersResponse, error) {
-	log.Printf("[FriendService] SearchRecommendedUsers")
-	return &pb.SearchRecommendedUsersResponse{
-		Users: []*pb.User{},
 	}, nil
 }

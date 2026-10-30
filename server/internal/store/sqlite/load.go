@@ -5,11 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"lunar-tear/server/internal/gametime"
 	"lunar-tear/server/internal/model"
 	"lunar-tear/server/internal/store"
 )
 
 func (s *SQLiteStore) LoadUser(userId int64) (store.UserState, error) {
+	u, err := s.loadStored(userId)
+	if err == nil {
+		store.UpgradeTimeKeys(&u, gametime.NowMillis())
+	}
+	return u, err
+}
+
+// loadStored reads the save as stored, before UpgradeTimeKeys.
+func (s *SQLiteStore) loadStored(userId int64) (store.UserState, error) {
 	var u store.UserState
 	var fbId sql.NullInt64
 
@@ -31,6 +41,7 @@ func (s *SQLiteStore) LoadUser(userId int64) (store.UserState, error) {
 
 	load1to1(s.db, userId, &u)
 	loadMapTables(s.db, userId, &u)
+	loadExt(s.db, userId, &u)
 
 	return u, nil
 }

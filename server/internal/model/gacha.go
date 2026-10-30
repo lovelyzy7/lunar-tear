@@ -64,10 +64,11 @@ const MomBannerDomainGacha int32 = 1
 
 const StepUpGroupDivisor int32 = 1000
 
-const (
-	PityCeilingCount int32 = 200
-	MedalCountCap    int32 = 9999
-)
+const PityCeilingCount int32 = 200
+
+// MedalCountCap is MConfig POSSESSION_COUNT_LIMIT_GACHA_MEDAL, used when the
+// config row is missing.
+const MedalCountCap int32 = 9999999
 
 const (
 	PremiumSinglePullPrice int32 = 300
@@ -115,7 +116,11 @@ const (
 
 const PhaseIdMultiplier int32 = 10
 
+// ChapterGachaIdBase + chapter is a chapter summon's id. Saves from before
+// used 200000 (see store.UpgradeChapterGachaIds).
 const (
-	ConsumableIdPremiumTicket int32 = 1
-	ConsumableIdChapterTicket int32 = 2
+	ChapterGachaIdBase       int32 = 2100000
+	LegacyChapterGachaIdBase int32 = 200000
 )
+
+const ConsumableIdPremiumTicket int32 = 1002 // m_config CONSUMABLE_ITEM_ID_FOR_PREMIUM_GACHA_TICKET

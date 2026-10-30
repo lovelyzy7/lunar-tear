@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"lunar-tear/server/internal/database"
 	"lunar-tear/server/internal/gacha"
@@ -40,10 +41,46 @@ func main() {
 	authURL := flag.String("auth-url", "", "Auth server base URL for Facebook token validation (e.g. http://localhost:3000)")
 	adminListen := flag.String("admin-listen", "127.0.0.1:8082", "admin webhook listen address (host:port). Loopback by default; only binds when LUNAR_ADMIN_TOKEN is set.")
 	noRegister := flag.Bool("no-register", false, "Disallow new account registrations for clients, when present. Default = false")
+	calendarPath := flag.String("calendar", "", "loop calendar.json path (default: LUNAR_CALENDAR or calendar.json next to the database). Missing file = calendar off (real clock, gacha windows borrowed).")
 	flag.Parse()
 
 	if *octoURL == "" {
 		log.Fatalf("--octo-url is required (e.g. http://10.0.2.2:8080)")
+	}
+
+	// The Original loop calendar (see internal/gametime/calendar.go): the game
+	// clock runs at real time + shift, so every rotating term in the 2024-04
+	// game data — mission pass, event quests, login stamps, Subjugation Battle,
+	// Labyrinth seasons, summons — comes alive on its own schedule again. It
+	// must be set before the master data loads: the gacha catalog skips its
+	// window borrow (the deployed fallback) while a calendar is running.
+	calPath := *calendarPath
+	if calPath == "" {
+		calPath = envOr("LUNAR_CALENDAR", filepath.Join(filepath.Dir(*dbPath), "calendar.json"))
+	}
+	calendar, err := gametime.LoadCalendar(calPath)
+	if err != nil {
+		log.Fatalf("init calendar: %v", err)
+	}
+	if calendar != nil {
+		master := masterDataPath()
+		if calendar, err = gametime.StartNextLoop(calPath, master, calendar, time.Now().UnixMilli()); err != nil {
+			log.Fatalf("calendar loop swap: %v", err)
+		}
+		if calendar, err = gametime.RewindLoop(calPath, calendar, time.Now().UnixMilli()); err != nil {
+			log.Fatalf("calendar rewind: %v", err)
+		}
+		if calendar, err = gametime.OpenAtFirstSummons(calPath, calendar, time.Now().UnixMilli()); err != nil {
+			log.Fatalf("calendar first summons: %v", err)
+		}
+	}
+	gametime.SetCalendar(calendar)
+	if calendar == nil {
+		log.Printf("calendar: off (no %s) — real clock, gacha schedule windows borrowed", calPath)
+	} else {
+		log.Printf("calendar: on (%s) loop %d, loopStart=%d, jump=%dms, speed=%v; game clock now %d (real+%dms)",
+			calPath, calendar.Loop, calendar.LoopStart, calendar.JumpMillis, calendar.Speed,
+			gametime.NowMillis(), calendar.Shift(time.Now().UnixMilli()))
 	}
 
 	holder, err := runtime.NewHolder(masterDataPath())

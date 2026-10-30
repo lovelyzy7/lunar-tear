@@ -5,6 +5,7 @@ import (
 	"log"
 	"sort"
 
+	"lunar-tear/server/internal/gametime"
 	"lunar-tear/server/internal/model"
 	"lunar-tear/server/internal/store"
 	"lunar-tear/server/internal/utils"
@@ -331,12 +332,20 @@ func (pool *GachaCatalog) BuildFeaturedFromTerms(entries []store.GachaCatalogEnt
 		}
 		gachaEligible++
 
-		costumes, weapons := pool.unionTermFeatured(entry.StartDatetime)
+		// Catalog terms keep their original dates under the calendar.
+		costumes, weapons := pool.unionTermFeatured(entry.StartDatetime - gametime.CalendarOffset())
 
-		if len(costumes) == 0 && len(weapons) == 0 && entry.MedalConsumableItemId != 0 {
+		// Summons that start together share their terms; the summon's own
+		// exchange shop tells which of those items are its own.
+		if entry.MedalConsumableItemId != 0 {
 			if shopEntries, ok := pool.ShopFeaturedByMedal[entry.MedalConsumableItemId]; ok {
-				costumes, weapons = pool.featuredFromShop(shopEntries)
-				if len(costumes) > 0 || len(weapons) > 0 {
+				shopCostumes, shopWeapons := pool.featuredFromShop(shopEntries)
+				ownCostumes, ownWeapons := intersectItems(costumes, shopCostumes), intersectItems(weapons, shopWeapons)
+				switch {
+				case len(ownCostumes) > 0 || len(ownWeapons) > 0:
+					costumes, weapons = ownCostumes, ownWeapons
+				case len(shopCostumes) > 0 || len(shopWeapons) > 0:
+					costumes, weapons = shopCostumes, shopWeapons
 					fromShop++
 				}
 			}
@@ -466,4 +475,19 @@ func buildEvolvedWeaponSet(rows []EntityMWeaponEvolutionGroup) map[int32]bool {
 		}
 	}
 	return evolved
+}
+
+// intersectItems keeps the items of a that are also in b.
+func intersectItems(a, b []GachaPoolItem) []GachaPoolItem {
+	in := make(map[int32]bool, len(b))
+	for _, x := range b {
+		in[x.PossessionId] = true
+	}
+	var out []GachaPoolItem
+	for _, x := range a {
+		if in[x.PossessionId] {
+			out = append(out, x)
+		}
+	}
+	return out
 }

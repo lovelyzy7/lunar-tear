@@ -50,6 +50,12 @@ func (s *GimmickServiceServer) UpdateGimmickProgress(ctx context.Context, req *p
 	var ornamentRewards []*pb.GimmickReward
 	var sequenceCleared bool
 	s.users.UpdateUser(userId, func(user *store.UserState) {
+		// A gimmick with its own release condition (the Lost Archives found
+		// only after another one) gives nothing before it is released.
+		if !cat.Gimmick.GimmickReleased(*user, req.GimmickId) {
+			log.Printf("[GimmickService] UpdateGimmickProgress: gimmick %d not released yet, ignored", req.GimmickId)
+			return
+		}
 		nowMillis := gametime.NowMillis()
 		progressKey := store.GimmickKey{
 			GimmickSequenceScheduleId: req.GimmickSequenceScheduleId,
@@ -81,8 +87,8 @@ func (s *GimmickServiceServer) UpdateGimmickProgress(ctx context.Context, req *p
 		//   * CageMemory (type 10, "Lost Archives")        — resolve an ImportantItem
 		//     (type 4) from the gimmick's monitor texture and grant it. IsGimmickCleared
 		//     stays false (matches original userdata; only ornament progress flips).
-		//   * CageTreasureHunt / CageIntervalDropItem*     — stub per-tap material so
-		//     the client's reward popup fires; real reward source still unmapped.
+		//   * CageTreasureHunt / CageIntervalDropItem*     — a Cage ornament reward
+		//     per tap (cageDrop); the real per-gimmick source is not in master data.
 		switch cat.Gimmick.GimmickType(req.GimmickId) {
 		case model.GimmickTypeReport:
 			progress.IsGimmickCleared = true
@@ -128,17 +134,13 @@ func (s *GimmickServiceServer) UpdateGimmickProgress(ctx context.Context, req *p
 			//   * type 1 — "Fickle Black Birds" in the cage
 			//   * type 2 — "Lost Items" in the cage
 			//   * type 8 — Lost Items (map variant)
-			// Stub: grant 1 of Material 100004 (the most-common reward across
-			// m_cage_ornament_reward — 15 occurrences — likely a low-tier shard) per
-			// tap so the client's reward-popup path fires and the player accumulates
-			// something. Replace once a real per-gimmick mapping surfaces.
-			const stubMaterialId = int32(100004)
-			const stubMaterialCount = int32(1)
-			cat.QuestHandler.Granter.GrantFull(user, model.PossessionTypeMaterial, stubMaterialId, stubMaterialCount, nowMillis)
+			// cageDrop draws from the Cage's ornament rewards instead.
+			dropType, dropId, dropCount := cageDrop()
+			cat.QuestHandler.Granter.GrantFull(user, dropType, dropId, dropCount, nowMillis)
 			ornamentRewards = append(ornamentRewards, &pb.GimmickReward{
-				PossessionType: int32(model.PossessionTypeMaterial),
-				PossessionId:   stubMaterialId,
-				Count:          stubMaterialCount,
+				PossessionType: int32(dropType),
+				PossessionId:   dropId,
+				Count:          dropCount,
 			})
 		}
 		user.Gimmick.Progress[progressKey] = progress

@@ -1,13 +1,27 @@
 package questflow
 
 import (
+	"errors"
 	"fmt"
 	"log"
 
+	"lunar-tear/server/internal/gametime"
 	"lunar-tear/server/internal/masterdata"
 	"lunar-tear/server/internal/model"
 	"lunar-tear/server/internal/store"
 )
+
+// addDailyClears counts n clears of a quest at nowMillis. The game shows a
+// daily-limited quest's remaining clears as its limit less DailyClearCount
+// when LastClearDatetime is today (GMT-8), so the count starts over on a new
+// game day.
+func addDailyClears(q *store.UserQuestState, n int32, nowMillis int64) {
+	if q.LastClearDatetime < gametime.StartOfDay(nowMillis) {
+		q.DailyClearCount = 0
+	}
+	q.DailyClearCount += n
+	q.LastClearDatetime = nowMillis
+}
 
 func (h *QuestHandler) initQuestState(user *store.UserState, questId int32) {
 	quest := user.Quests[questId]
@@ -60,8 +74,9 @@ func (h *QuestHandler) handleQuestStartInternal(user *store.UserState, questId i
 	}
 
 	h.initQuestState(user, questId)
+	ResetBattleStats(user)
 	if quest.Stamina > 0 {
-		stamina := h.staminaWithCampaign(quest.Stamina, h.targetForMain(questId), nowMillis)
+		stamina := h.staminaWithCampaign(user, quest.Stamina, h.targetForMain(questId), nowMillis)
 		store.ConsumeStamina(user, stamina, h.MaxStaminaByLevel[user.Status.Level]*1000, nowMillis)
 	}
 
@@ -110,8 +125,7 @@ func (h *QuestHandler) handleQuestStartInternal(user *store.UserState, questId i
 	} else {
 		questState.QuestStateType = model.UserQuestStateTypeCleared
 		questState.ClearCount = 1
-		questState.DailyClearCount = 1
-		questState.LastClearDatetime = nowMillis
+		addDailyClears(&questState, 1, nowMillis)
 		if sceneIds := h.SceneIdsByQuestId[questId]; len(sceneIds) > 0 {
 			firstSceneId := sceneIds[0]
 			prevSceneId := user.MainQuest.CurrentQuestSceneId
@@ -157,8 +171,7 @@ func (h *QuestHandler) applyReplayStart(user *store.UserState, quest masterdata.
 		if questState.QuestStateType != model.UserQuestStateTypeCleared {
 			questState.QuestStateType = model.UserQuestStateTypeCleared
 			questState.ClearCount++
-			questState.DailyClearCount++
-			questState.LastClearDatetime = nowMillis
+			addDailyClears(&questState, 1, nowMillis)
 		}
 		user.Quests[questId] = questState
 		if sceneIds := h.SceneIdsByQuestId[questId]; len(sceneIds) > 0 {
@@ -195,24 +208,27 @@ func (h *QuestHandler) applyQuestVictory(user *store.UserState, questId int32, o
 			outcome.ChangedWeaponStoryIds = append(outcome.ChangedWeaponStoryIds,
 				h.grantWeaponStoryUnlocksForQuestScene(user, questId, model.QuestResultTypeFullResult, nowMillis)...)
 		}
-
-		for _, r := range outcome.MissionClearRewards {
-			h.applyRewardPossession(user, r.PossessionType, r.PossessionId, r.Count, nowMillis)
-		}
-		for _, r := range outcome.MissionClearCompleteRewards {
-			h.applyRewardPossession(user, r.PossessionType, r.PossessionId, r.Count, nowMillis)
-		}
 		questState.IsRewardGranted = true
 	}
+	// Missions pay when they clear, on the first clear or any later win.
+	for _, r := range outcome.MissionClearRewards {
+		h.applyRewardPossession(user, r.PossessionType, r.PossessionId, r.Count, nowMillis)
+	}
+	for _, r := range outcome.MissionClearCompleteRewards {
+		h.applyRewardPossession(user, r.PossessionType, r.PossessionId, r.Count, nowMillis)
+	}
+	h.markMissionsCleared(user, questId, outcome.clearedMissionIds, nowMillis)
 	raritySet, rankSet := parseAutoSaleRules(user.AutoSaleSettings)
 	h.grantDropRewards(user, outcome.DropRewards, raritySet, rankSet, nowMillis)
+	if deck, ok := battleDeck(user, questId); ok {
+		h.grantQuestBonusDrops(user, h.QuestById[questId], deck, 1, nowMillis)
+	}
 	for _, reward := range outcome.ReplayFlowFirstClearRewards {
 		h.applyRewardPossession(user, reward.PossessionType, reward.PossessionId, reward.Count, nowMillis)
 	}
 	questState.QuestStateType = model.UserQuestStateTypeCleared
 	questState.ClearCount++
-	questState.DailyClearCount++
-	questState.LastClearDatetime = nowMillis
+	addDailyClears(&questState, 1, nowMillis)
 	questState.IsBattleOnly = false
 	user.Quests[questId] = questState
 }
@@ -232,23 +248,26 @@ func (h *QuestHandler) finalizeChainPreviousQuest(user *store.UserState, questId
 	}
 	questState.QuestStateType = model.UserQuestStateTypeCleared
 	questState.ClearCount++
-	questState.DailyClearCount++
-	questState.LastClearDatetime = nowMillis
+	addDailyClears(&questState, 1, nowMillis)
 	questState.IsBattleOnly = false
 	user.Quests[questId] = questState
 	h.clearQuestMissions(user, questId, nowMillis)
 	log.Printf("[HandleMainQuestSceneProgress] finalized chain-previous quest %d (cleared)", questId)
 }
 
-func restoreClearedAfterRetire(user *store.UserState, questId int32, isRetired bool) {
-	if !isRetired {
-		return
-	}
+// settleLostQuestState sets a quest's state after a retire or wipe: Cleared
+// if it was ever cleared, else Challenged (4). The client's
+// CalculatorQuest.IsChallengeQuest counts both as challenged, which the
+// QUEST_CHALLENGE release condition reads (quest 385 opens 382-387).
+func settleLostQuestState(user *store.UserState, questId int32) {
 	qs := user.Quests[questId]
-	if qs.ClearCount > 0 && qs.QuestStateType == model.UserQuestStateTypeActive {
+	if qs.ClearCount > 0 {
 		qs.QuestStateType = model.UserQuestStateTypeCleared
-		user.Quests[questId] = qs
+	} else {
+		qs.QuestStateType = model.UserQuestStateTypeChallenged
 	}
+	qs.IsBattleOnly = false
+	user.Quests[questId] = qs
 }
 
 func (h *QuestHandler) HandleQuestFinish(user *store.UserState, questId int32, isRetired, isAnnihilated bool, nowMillis int64) FinishOutcome {
@@ -264,7 +283,7 @@ func (h *QuestHandler) HandleQuestFinish(user *store.UserState, questId int32, i
 
 	var outcome FinishOutcome
 	if !isRetired && !isAnnihilated {
-		outcome = h.evaluateFinishOutcome(user, questId, h.targetForMain(questId), nowMillis)
+		outcome = h.evaluateFinishOutcome(user, questId, h.targetForMain(questId), wasReplay, nowMillis)
 		h.applyQuestVictory(user, questId, &outcome, nowMillis, wasReplay)
 
 		// A replay-flow finish must NOT move the MainFlow scene pointer: the
@@ -278,14 +297,16 @@ func (h *QuestHandler) HandleQuestFinish(user *store.UserState, questId int32, i
 		}
 	}
 
-	consumed := h.staminaWithCampaign(quest.Stamina, h.targetForMain(questId), nowMillis)
+	consumed := h.staminaWithCampaign(user, quest.Stamina, h.targetForMain(questId), nowMillis)
 	if isRetired && !isAnnihilated && consumed > 1 {
 		refund := consumed - 1
 		maxMillis := h.MaxStaminaByLevel[user.Status.Level] * 1000
 		store.RecoverStamina(user, refund*1000, maxMillis, nowMillis)
 	}
 
-	restoreClearedAfterRetire(user, questId, isRetired)
+	if isRetired || isAnnihilated {
+		settleLostQuestState(user, questId)
+	}
 
 	user.MainQuest.ProgressQuestSceneId = 0
 	user.MainQuest.ProgressHeadQuestSceneId = 0
@@ -313,31 +334,38 @@ func (h *QuestHandler) HandleQuestFinish(user *store.UserState, questId int32, i
 			ctx.CurrentQuestSceneId, ctx.HeadQuestSceneId, ctx.PortalCageInProgress, ctx.CurrentQuestFlowType)
 	}
 
-	h.clearQuestMissions(user, questId, nowMillis)
-
 	return outcome
 }
 
-func (h *QuestHandler) HandleQuestSkip(user *store.UserState, questId, skipCount int32, nowMillis int64) FinishOutcome {
+// ErrSkipRefused is returned (wrapped) when a skip is not allowed; nothing
+// has been changed.
+var ErrSkipRefused = errors.New("quest skip refused")
+
+// HandleQuestSkip clears a quest skipCount times with skip tickets. It
+// refuses, changing nothing, when the count is outside 1..QUEST_SKIP_MAX_COUNT_AT_ONCE
+// or the tickets or stamina are short. deckNumber is the quest deck whose
+// quest bonuses apply.
+func (h *QuestHandler) HandleQuestSkip(user *store.UserState, questId, skipCount, deckNumber int32, nowMillis int64) (FinishOutcome, error) {
 	questDef, ok := h.QuestById[questId]
 	if !ok {
-		panic(fmt.Sprintf("unknown questId=%d for HandleQuestSkip", questId))
+		return FinishOutcome{}, fmt.Errorf("%w: unknown questId=%d", ErrSkipRefused, questId)
 	}
 
 	target := h.targetForMain(questId)
 	maxMillis := h.MaxStaminaByLevel[user.Status.Level] * 1000
-	perSkipStamina := h.staminaWithCampaign(questDef.Stamina, target, nowMillis)
-	store.ConsumeStamina(user, perSkipStamina*skipCount, maxMillis, nowMillis)
-
+	perSkipStamina := h.staminaWithCampaign(user, questDef.Stamina, target, nowMillis)
 	skipTicketId := h.Config.ConsumableItemIdForQuestSkipTicket
-	user.ConsumableItems[skipTicketId] -= skipCount
-	if user.ConsumableItems[skipTicketId] < 0 {
-		user.ConsumableItems[skipTicketId] = 0
+	if err := h.checkSkip(user, skipCount, perSkipStamina, skipTicketId, maxMillis, nowMillis); err != nil {
+		return FinishOutcome{}, fmt.Errorf("quest %d: %w", questId, err)
 	}
+
+	store.ConsumeStamina(user, perSkipStamina*skipCount, maxMillis, nowMillis)
+	user.ConsumableItems[skipTicketId] -= skipCount
+
 	raritySet, rankSet := parseAutoSaleRules(user.AutoSaleSettings)
 	var allDrops []RewardGrant
 	for range skipCount {
-		drops := h.computeDropRewards(questDef, target, nowMillis)
+		drops := h.computeDropRewards(user, questDef, target, nowMillis)
 		h.grantDropRewards(user, drops, raritySet, rankSet, nowMillis)
 		allDrops = append(allDrops, drops...)
 
@@ -346,15 +374,38 @@ func (h *QuestHandler) HandleQuestSkip(user *store.UserState, questId, skipCount
 		}
 		h.applyExpRewards(user, questId, nowMillis)
 	}
+	if deck, ok := user.Decks[store.DeckKey{DeckType: model.DeckTypeQuest, UserDeckNumber: deckNumber}]; ok {
+		h.grantQuestBonusDrops(user, questDef, deck, skipCount, nowMillis)
+	}
 
 	questState := user.Quests[questId]
 	questState.ClearCount += skipCount
-	questState.DailyClearCount += skipCount
-	questState.LastClearDatetime = nowMillis
+	addDailyClears(&questState, skipCount, nowMillis)
 	user.Quests[questId] = questState
 
 	log.Printf("[HandleQuestSkip] questId=%d skipCount=%d drops=%d gold=%d", questId, skipCount, len(allDrops), questDef.Gold*skipCount)
-	return FinishOutcome{DropRewards: allDrops}
+	return FinishOutcome{DropRewards: allDrops}, nil
+}
+
+// checkSkip refuses a skip the player cannot pay for (settled stamina is
+// compared, as ConsumeStamina settles before it spends).
+func (h *QuestHandler) checkSkip(user *store.UserState, skipCount, perSkipStamina, skipTicketId, maxMillis int32, nowMillis int64) error {
+	limit := int32(100)
+	if h.Config != nil && h.Config.QuestSkipMaxCountAtOnce > 0 {
+		limit = h.Config.QuestSkipMaxCountAtOnce
+	}
+	if skipCount <= 0 || skipCount > limit {
+		return fmt.Errorf("%w: skipCount %d outside 1..%d", ErrSkipRefused, skipCount, limit)
+	}
+	if have := user.ConsumableItems[skipTicketId]; have < skipCount {
+		return fmt.Errorf("%w: %d skip tickets, %d needed", ErrSkipRefused, have, skipCount)
+	}
+	probe := *user
+	store.SettleStamina(&probe, maxMillis, nowMillis)
+	if need := int64(perSkipStamina) * int64(skipCount) * 1000; int64(probe.Status.StaminaMilliValue) < need {
+		return fmt.Errorf("%w: stamina %d/1000, %d needed", ErrSkipRefused, probe.Status.StaminaMilliValue, need/1000)
+	}
+	return nil
 }
 
 func (h *QuestHandler) HandleQuestRestart(user *store.UserState, questId int32, nowMillis int64) {
@@ -372,14 +423,8 @@ func (h *QuestHandler) HandleQuestRestart(user *store.UserState, questId int32, 
 	quest.LatestStartDatetime = nowMillis
 	user.Quests[questId] = quest
 
-	for _, missionId := range h.MissionIdsByQuestId[questId] {
-		key := store.QuestMissionKey{QuestId: questId, QuestMissionId: missionId}
-		m := user.QuestMissions[key]
-		m.QuestId = questId
-		m.QuestMissionId = missionId
-		m.IsClear = false
-		m.ProgressValue = 0
-		m.LatestClearDatetime = 0
-		user.QuestMissions[key] = m
+	// Cleared missions stay cleared: a restart resumes the same run.
+	if ok {
+		h.initQuestState(user, questId)
 	}
 }

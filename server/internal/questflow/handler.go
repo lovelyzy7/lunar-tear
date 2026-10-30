@@ -25,6 +25,8 @@ type FinishOutcome struct {
 	BigWinClearedQuestMissionIds []int32
 	IsBigWin                     bool
 	ChangedWeaponStoryIds        []int32
+
+	clearedMissionIds []int32 // regular and COMPLETE missions this win cleared
 }
 
 type QuestHandler struct {

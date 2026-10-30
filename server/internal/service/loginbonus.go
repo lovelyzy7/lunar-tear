@@ -19,6 +19,9 @@ import (
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
 )
 
+// giftTextLoginBonus is MGiftText 3, "Earned from login bonus."
+const giftTextLoginBonus int32 = 3
+
 type LoginBonusServiceServer struct {
 	pb.UnimplementedLoginBonusServiceServer
 	users    store.UserRepository
@@ -35,42 +38,57 @@ func (s *LoginBonusServiceServer) ReceiveStamp(ctx context.Context, req *emptypb
 	userId := CurrentUserId(ctx, s.users, s.sessions)
 	catalog := s.holder.Get().LoginBonus
 
-	user, err := s.users.LoadUser(userId)
-	if err != nil {
-		return nil, fmt.Errorf("load user: %w", err)
-	}
-
-	nextPage, nextStamp, reward, err := resolveNextStamp(catalog, user.LoginBonus)
-	if err != nil {
-		return nil, err
-	}
-
-	log.Printf("[LoginBonusService] bonusId=%d page %d->%d stamp %d->%d possType=%d possId=%d count=%d (-> gift box)",
-		user.LoginBonus.LoginBonusId,
-		user.LoginBonus.CurrentPageNumber, nextPage,
-		user.LoginBonus.CurrentStampNumber, nextStamp,
-		reward.PossessionType, reward.PossessionId, reward.Count)
-
-	s.users.UpdateUser(userId, func(u *store.UserState) {
+	// One stamp per game day on each card: the everyday one and every dated
+	// login bonus open today (see bunker_login_bonus.go). A repeat call gets
+	// the normal empty response.
+	var stampErr error
+	_, err := s.users.UpdateUser(userId, func(u *store.UserState) {
 		now := gametime.NowMillis()
-		u.Gifts.NotReceived = append(u.Gifts.NotReceived, store.NotReceivedGiftState{
-			GiftCommon: store.GiftCommonState{
-				PossessionType: reward.PossessionType,
-				PossessionId:   reward.PossessionId,
-				Count:          reward.Count,
-				GrantDatetime:  now,
-			},
-			ExpirationDatetime: now + int64(30*24*time.Hour/time.Millisecond),
-			UserGiftUuid:       uuid.New().String(),
-		})
-		u.Notifications.GiftNotReceiveCount = int32(len(u.Gifts.NotReceived))
+		stampEventLoginBonuses(catalog, u, now)
+		// One stamp per game day: compare days, not `>= today` — a stamp time
+		// in the game clock's future (a real-time save or RewindLoop leftover)
+		// would otherwise block every later day.
+		if gametime.SameDay(u.LoginBonus.LatestRewardReceiveDatetime, now) {
+			log.Printf("[LoginBonusService] ReceiveStamp: already stamped today")
+			return
+		}
+		nextPage, nextStamp, reward, err := resolveNextStamp(catalog, u.LoginBonus)
+		if err != nil {
+			stampErr = err
+			return
+		}
+		log.Printf("[LoginBonusService] bonusId=%d page %d->%d stamp %d->%d possType=%d possId=%d count=%d (-> gift box)",
+			u.LoginBonus.LoginBonusId, u.LoginBonus.CurrentPageNumber, nextPage, u.LoginBonus.CurrentStampNumber, nextStamp,
+			reward.PossessionType, reward.PossessionId, reward.Count)
+		addLoginBonusGift(u, reward, now)
 		u.LoginBonus.CurrentPageNumber = nextPage
 		u.LoginBonus.CurrentStampNumber = nextStamp
 		u.LoginBonus.LatestRewardReceiveDatetime = now
 		u.LoginBonus.LatestVersion = now
 	})
-
+	if err != nil {
+		return nil, fmt.Errorf("receive stamp: %w", err)
+	}
+	if stampErr != nil {
+		return nil, stampErr
+	}
 	return &pb.ReceiveStampResponse{}, nil
+}
+
+// addLoginBonusGift puts a stamp's reward in the gift box for 30 days.
+func addLoginBonusGift(u *store.UserState, reward masterdata.LoginBonusReward, now int64) {
+	u.Gifts.NotReceived = append(u.Gifts.NotReceived, store.NotReceivedGiftState{
+		GiftCommon: store.GiftCommonState{
+			PossessionType:        reward.PossessionType,
+			PossessionId:          reward.PossessionId,
+			Count:                 reward.Count,
+			GrantDatetime:         now,
+			DescriptionGiftTextId: giftTextLoginBonus,
+		},
+		ExpirationDatetime: now + int64(30*24*time.Hour/time.Millisecond),
+		UserGiftUuid:       uuid.New().String(),
+	})
+	pruneExpiredGifts(u, now)
 }
 
 func resolveNextStamp(catalog *masterdata.LoginBonusCatalog, lb store.UserLoginBonusState) (nextPage, nextStamp int32, reward masterdata.LoginBonusReward, err error) {

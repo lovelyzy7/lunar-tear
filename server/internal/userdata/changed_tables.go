@@ -74,7 +74,7 @@ func ChangedTables(before, after *store.UserState) []string {
 	if before.Login != after.Login {
 		add("IUserLogin")
 	}
-	if before.LoginBonus != after.LoginBonus {
+	if before.LoginBonus != after.LoginBonus || !maps.Equal(before.Ext.EventLoginBonuses, after.Ext.EventLoginBonuses) {
 		add("IUserLoginBonus")
 	}
 	if before.PortalCageStatus != after.PortalCageStatus {
@@ -214,6 +214,9 @@ func ChangedTables(before, after *store.UserState) []string {
 	if !mapsEqualStruct(before.QuestLimitContentStatus, after.QuestLimitContentStatus) {
 		add("IUserQuestLimitContentStatus")
 	}
+	if !slices.Equal(before.Ext.Quest.LimitContentRestricted, after.Ext.Quest.LimitContentRestricted) {
+		add("IUserDeckLimitContentRestricted")
+	}
 	if !mapsEqualSimple(before.NaviCutInPlayed, after.NaviCutInPlayed) {
 		add("IUserNaviCutIn")
 	}
@@ -307,6 +310,7 @@ func ChangedTables(before, after *store.UserState) []string {
 			add("IUserGimmickUnlock")
 		}
 	}
+	changed = append(changed, bunkerChangedTables(before, after)...)
 
 	return changed
 }
@@ -377,6 +381,8 @@ func keyFieldsForTable(table string) []string {
 		return []string{"userId", "userDeckCharacterUuid"}
 	case "IUserDeck":
 		return []string{"userId", "deckType", "userDeckNumber"}
+	case "IUserDeckLimitContentRestricted":
+		return []string{"userId", "eventQuestChapterId", "questId", "deckRestrictedUuid"}
 	case "IUserTripleDeck":
 		return []string{"userId", "deckType", "userDeckNumber"}
 	case "IUserDeckSubWeaponGroup":
@@ -482,6 +488,6 @@ func keyFieldsForTable(table string) []string {
 	case "IUserQuestAutoOrbit":
 		return []string{"userId"}
 	default:
-		return nil
+		return bunkerKeyFields(table)
 	}
 }

@@ -37,9 +37,29 @@ func init() {
 		s, _ := utils.EncodeJSONMaps(sortedDeckDressupCostumeRecords(user)...)
 		return s
 	})
-	registerStatic(
-		"IUserDeckLimitContentRestricted",
-	)
+	register("IUserDeckLimitContentRestricted", func(user store.UserState) string {
+		s, _ := utils.EncodeJSONMaps(deckLimitContentRestrictedRecords(user)...)
+		return s
+	})
+}
+
+// deckLimitContentRestrictedRecords lists the Recollections of Dusk deck locks
+// (store.QuestExtState.LimitContentRestricted).
+func deckLimitContentRestrictedRecords(user store.UserState) []map[string]any {
+	rows := user.Ext.Quest.LimitContentRestricted
+	records := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		records = append(records, map[string]any{
+			"userId":              user.UserId,
+			"eventQuestChapterId": r.EventQuestChapterId,
+			"questId":             r.QuestId,
+			"deckRestrictedUuid":  r.DeckRestrictedUuid,
+			"possessionType":      r.PossessionType,
+			"targetUuid":          r.TargetUuid,
+			"latestVersion":       r.LatestVersion,
+		})
+	}
+	return records
 }
 
 func sortedDeckRecords(user store.UserState) []map[string]any {

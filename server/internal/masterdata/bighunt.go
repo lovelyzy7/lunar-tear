@@ -3,8 +3,8 @@ package masterdata
 import (
 	"log"
 	"sort"
-	"time"
 
+	"lunar-tear/server/internal/gametime"
 	"lunar-tear/server/internal/utils"
 )
 
@@ -55,7 +55,8 @@ type BigHuntCatalog struct {
 	ScoreCoefficients           map[int32]int32
 	BossByBossId                map[int32]BigHuntBossRow
 	GradeThresholds             map[int32][]GradeThreshold
-	ActiveScheduleId            int32
+	ActiveScheduleId            int32 // at server start; use ScheduleAt for the current one
+	schedules                   []EntityMBigHuntSchedule
 	ScoreRewardSchedules        map[int32][]ScoreRewardScheduleEntry
 	ScoreRewardThresholds       map[int32][]ScoreRewardThreshold
 	RewardItems                 map[int32][]RewardItem
@@ -105,15 +106,22 @@ func (c *BigHuntCatalog) ResolveGradeIconId(bossId int32, score int64) int32 {
 	return iconId
 }
 
-func (c *BigHuntCatalog) CollectNewRewards(scoreRewardGroupId int32, oldMax, newMax int64) []RewardItem {
-	thresholds := c.ScoreRewardThresholds[scoreRewardGroupId]
-	var items []RewardItem
-	for _, t := range thresholds {
-		if t.NecessaryScore > oldMax && t.NecessaryScore <= newMax {
-			items = append(items, c.RewardItems[t.BigHuntRewardGroupId]...)
+// TierRewards is the reward of the highest m_big_hunt_score_reward_group tier
+// a score reaches. Each tier lists its whole bundle (higher tiers repeat and
+// raise the lower ones), so only that one tier is paid, as the client's
+// GetWeeklyAttributeRewardPossessionItem picks
+// OrderByDescending(NecessaryScore).FirstOrDefault().
+func (c *BigHuntCatalog) TierRewards(scoreRewardGroupId int32, score int64) []RewardItem {
+	var best *ScoreRewardThreshold
+	for i, t := range c.ScoreRewardThresholds[scoreRewardGroupId] {
+		if t.NecessaryScore <= score && (best == nil || t.NecessaryScore >= best.NecessaryScore) {
+			best = &c.ScoreRewardThresholds[scoreRewardGroupId][i]
 		}
 	}
-	return items
+	if best == nil {
+		return nil
+	}
+	return c.RewardItems[best.BigHuntRewardGroupId]
 }
 
 func LoadBigHuntCatalog() *BigHuntCatalog {
@@ -188,7 +196,7 @@ func LoadBigHuntCatalog() *BigHuntCatalog {
 	if err != nil {
 		log.Fatalf("load big hunt schedule table: %v", err)
 	}
-	nowMillis := time.Now().UnixMilli()
+	nowMillis := gametime.NowMillis()
 	var activeScheduleId int32
 	var latestEndDatetime int64
 	for _, r := range scheduleRows {
@@ -282,9 +290,30 @@ func LoadBigHuntCatalog() *BigHuntCatalog {
 		BossByBossId:                bossByBossId,
 		GradeThresholds:             gradeThresholds,
 		ActiveScheduleId:            activeScheduleId,
+		schedules:                   scheduleRows,
 		ScoreRewardSchedules:        scoreRewardSchedules,
 		ScoreRewardThresholds:       scoreRewardThresholds,
 		RewardItems:                 rewardItems,
 		WeeklyRewardSchedulesByAttr: weeklyRewardSchedulesByAttr,
 	}
+}
+
+// ScheduleAt is the Subjugation Battle schedule open at nowMillis, or else the one that
+// ends last. With the Original calendar the schedule changes while the server
+// runs, so callers ask with the current game time.
+func (c *BigHuntCatalog) ScheduleAt(nowMillis int64) int32 {
+	if len(c.schedules) == 0 {
+		return c.ActiveScheduleId
+	}
+	var id int32
+	var latestEnd int64
+	for _, r := range c.schedules {
+		if nowMillis >= r.ChallengeStartDatetime && nowMillis <= r.ChallengeEndDatetime {
+			return r.BigHuntScheduleId
+		}
+		if r.ChallengeEndDatetime > latestEnd {
+			latestEnd, id = r.ChallengeEndDatetime, r.BigHuntScheduleId
+		}
+	}
+	return id
 }

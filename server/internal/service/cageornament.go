@@ -62,20 +62,10 @@ func (s *CageOrnamentServiceServer) ReceiveReward(ctx context.Context, req *pb.R
 	}, nil
 }
 
+// RecordAccess only notes that the player opened a cage ornament. The client
+// has no table for it, so there is nothing to store: writing a reward row here
+// would show the ornament's reward as received without granting it.
 func (s *CageOrnamentServiceServer) RecordAccess(ctx context.Context, req *pb.RecordAccessRequest) (*pb.RecordAccessResponse, error) {
 	log.Printf("[CageOrnamentService] RecordAccess: cageOrnamentId=%d", req.CageOrnamentId)
-
-	userId := CurrentUserId(ctx, s.users, s.sessions)
-	nowMillis := gametime.NowMillis()
-	s.users.UpdateUser(userId, func(user *store.UserState) {
-		if _, exists := user.CageOrnamentRewards[req.CageOrnamentId]; !exists {
-			user.CageOrnamentRewards[req.CageOrnamentId] = store.CageOrnamentRewardState{
-				CageOrnamentId:      req.CageOrnamentId,
-				AcquisitionDatetime: nowMillis,
-				LatestVersion:       nowMillis,
-			}
-		}
-	})
-
 	return &pb.RecordAccessResponse{}, nil
 }

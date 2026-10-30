@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"slices"
 	"sort"
 
 	"github.com/google/uuid"
@@ -80,6 +81,8 @@ func GrantPossession(user *UserState, possessionType model.PossessionType, posse
 		user.ImportantItems[possessionId] += count
 	case model.PossessionTypePremiumItem:
 		user.PremiumItems[possessionId] = gametime.NowMillis()
+	case model.PossessionTypeThought:
+		GrantThought(user, possessionId, gametime.NowMillis())
 	default:
 		log.Printf("[GrantPossession] unhandled type=%d id=%d count=%d", possessionType, possessionId, count)
 	}
@@ -118,6 +121,64 @@ type PartsStatusSubDef struct {
 	StatusFunc               func(level int32) int32
 }
 
+// DuplicateExchange is one possession given in place of a costume or
+// companion the player already owns (m_costume_duplication_exchange_possession_group,
+// m_companion_duplication_exchange_possession_group).
+type DuplicateExchange struct {
+	PossessionType model.PossessionType
+	PossessionId   int32
+	Count          int32
+}
+
+// CostumeEnhancedRef is an m_costume_enhanced row: possession type 7 grants
+// the costume already at this level, limit break, skill level and awakening.
+type CostumeEnhancedRef struct {
+	CostumeId        int32
+	Level            int32
+	LimitBreakCount  int32
+	ActiveSkillLevel int32
+	AwakenCount      int32
+}
+
+// CompanionEnhancedRef is an m_companion_enhanced row: possession type 9
+// grants the companion at this level.
+type CompanionEnhancedRef struct {
+	CompanionId int32
+	Level       int32
+}
+
+// PossessionLimits are MConfig POSSESSION_COUNT_LIMIT_*: the most a player
+// can hold. Zero means no limit.
+type PossessionLimits struct {
+	Weapon         int32 // weapons owned
+	Parts          int32 // parts owned
+	Material       int32 // per material
+	ConsumableItem int32 // per consumable item, except gold
+	Money          int32 // gold
+	ImportantItem  int32 // per important item
+	GachaMedal     int32 // per gacha medal (ConsumableItemType GACHA_MEDAL)
+}
+
+// MGiftText ids of the gifts the server sends.
+const (
+	GiftTextSummons              int32 = 1  // "Earned from summons."
+	GiftTextDuplicateCostume     int32 = 6  // "Earned from obtaining a duplicate costume."
+	GiftTextDuplicateCompanion   int32 = 7  // "Earned from obtaining a duplicate companion."
+	GiftTextOverflow             int32 = 11 // "A gift for holding too many items."
+	GiftTextPremiumShopOverflow  int32 = 31 // "Item that exceeded the cap due to a purchase at the premium shop."
+	GiftTextExchangeShopOverflow int32 = 32 // "Item that exceeded the cap due to an exchange at the shop."
+)
+
+// GiftExpirationMillis is how long a gift the server sends stays claimable.
+const GiftExpirationMillis int64 = 30 * 24 * 60 * 60 * 1000
+
+// GrantOverflow is what a grant sent to the gift box because of a limit.
+type GrantOverflow struct {
+	PossessionType model.PossessionType
+	PossessionId   int32
+	Count          int32
+}
+
 type PossessionGranter struct {
 	CostumeById        map[int32]CostumeRef
 	WeaponById         map[int32]WeaponRef
@@ -134,6 +195,20 @@ type PossessionGranter struct {
 	PartsSellPriceL1ByRarity map[int32]int32
 	GoldConsumableItemId     int32
 
+	CostumeDuplicateExchange   map[int32][]DuplicateExchange // CostumeId ->
+	CompanionDuplicateExchange map[int32][]DuplicateExchange // CompanionId ->
+	CostumeEnhancedById        map[int32]CostumeEnhancedRef  // CostumeEnhancedId ->
+	CompanionEnhancedById      map[int32]CompanionEnhancedRef
+	// CostumeExpForLevel is the exp a costume has on reaching level.
+	CostumeExpForLevel func(costumeId, level int32) int32
+	// ApplyCostumeAwaken applies one awakening step's effect to a costume.
+	ApplyCostumeAwaken func(user *UserState, userCostumeUuid string, costumeId, step int32, nowMillis int64)
+
+	Limits PossessionLimits
+	// GachaMedalItemIds are the consumable items of ConsumableItemType
+	// GACHA_MEDAL, limited by Limits.GachaMedal instead of ConsumableItem.
+	GachaMedalItemIds map[int32]bool
+
 	LastChangedStoryWeaponIds []int32
 }
 
@@ -143,25 +218,301 @@ func (g *PossessionGranter) DrainChangedStoryWeaponIds() []int32 {
 	return ids
 }
 
+// GrantFull grants count of a possession the way every reward path does. A
+// costume or companion the player already owns becomes its duplicate
+// exchange possessions instead; enhanced costumes and companions arrive at
+// their m_*_enhanced level. What would go past a possession limit goes to the
+// gift box as "A gift for holding too many items" (see GrantFullAs).
 func (g *PossessionGranter) GrantFull(user *UserState, possessionType model.PossessionType, possessionId, count int32, nowMillis int64) {
+	g.GrantFullAs(user, possessionType, possessionId, count, nowMillis, GiftTextOverflow)
+}
+
+// GrantFullAs is GrantFull with the MGiftText id for anything that would go
+// past a possession limit: that part is sent to the gift box instead of being
+// dropped or refused. It returns what went to the gift box; the same entries
+// are also added to user.Ext.GrantOverflow for TakeGrantOverflow.
+func (g *PossessionGranter) GrantFullAs(user *UserState, possessionType model.PossessionType, possessionId, count int32, nowMillis int64, giftTextId int32) []GrantOverflow {
+	start := len(user.Ext.GrantOverflow)
+	n := max(count, 1)
 	switch possessionType {
-	case model.PossessionTypeCostume, model.PossessionTypeCostumeEnhanced:
-		g.GrantCostume(user, possessionId, nowMillis)
+	case model.PossessionTypeCostume:
+		for range n {
+			if !g.GrantCostume(user, possessionId, nowMillis) {
+				g.grantExchange(user, g.CostumeDuplicateExchange[possessionId], nowMillis, GiftTextDuplicateCostume)
+			}
+		}
+	case model.PossessionTypeCostumeEnhanced:
+		for range n {
+			g.grantCostumeEnhanced(user, possessionId, nowMillis)
+		}
 	case model.PossessionTypeWeapon, model.PossessionTypeWeaponEnhanced:
-		g.GrantWeapon(user, possessionId, nowMillis)
-	case model.PossessionTypeCompanion, model.PossessionTypeCompanionEnhanced:
-		g.GrantCompanion(user, possessionId, nowMillis)
+		over := int32(0)
+		for range n {
+			if g.Limits.Weapon > 0 && len(user.Weapons) >= int(g.Limits.Weapon) {
+				over++
+				continue
+			}
+			g.GrantWeapon(user, possessionId, nowMillis)
+		}
+		g.sendOverflow(user, possessionType, possessionId, over, nowMillis, giftTextId)
+	case model.PossessionTypeCompanion:
+		for range n {
+			if !g.GrantCompanion(user, possessionId, nowMillis) {
+				g.grantExchange(user, g.CompanionDuplicateExchange[possessionId], nowMillis, GiftTextDuplicateCompanion)
+			}
+		}
+	case model.PossessionTypeCompanionEnhanced:
+		for range n {
+			g.grantCompanionEnhanced(user, possessionId, nowMillis)
+		}
 	case model.PossessionTypeParts, model.PossessionTypePartsEnhanced:
-		g.GrantParts(user, possessionId, nowMillis)
+		over := int32(0)
+		for range n {
+			if g.Limits.Parts > 0 && len(user.Parts) >= int(g.Limits.Parts) {
+				over++
+				continue
+			}
+			g.GrantParts(user, possessionId, nowMillis)
+		}
+		g.sendOverflow(user, possessionType, possessionId, over, nowMillis, giftTextId)
 	default:
-		GrantPossession(user, possessionType, possessionId, count)
+		g.GrantCapped(user, possessionType, possessionId, count, nowMillis, giftTextId)
+	}
+	if len(user.Ext.GrantOverflow) == start {
+		return nil
+	}
+	return slices.Clone(user.Ext.GrantOverflow[start:])
+}
+
+// GrantCapped grants a stackable possession (material, consumable item, gold,
+// gacha medal, important item) up to its limit and sends the rest to the gift
+// box with giftTextId. Other possession types are granted as GrantPossession
+// does. For summons, which grant stackables directly.
+func (g *PossessionGranter) GrantCapped(user *UserState, possessionType model.PossessionType, possessionId, count int32, nowMillis int64, giftTextId int32) {
+	if have, limit, ok := g.stackLimit(user, possessionType, possessionId); ok && limit > 0 && count > 0 {
+		room := max(int64(limit)-have, 0)
+		if int64(count) > room {
+			// Gifts of at most the limit each, so every one can be claimed once there is room.
+			for rest := count - int32(room); rest > 0; rest -= min(rest, limit) {
+				g.sendOverflow(user, possessionType, possessionId, min(rest, limit), nowMillis, giftTextId)
+			}
+			count = int32(room)
+		}
+		if count == 0 {
+			return
+		}
+	}
+	GrantPossession(user, possessionType, possessionId, count)
+}
+
+// GrantWeaponCapped grants one weapon, or sends it to the gift box with
+// giftTextId when the player holds the most weapons allowed.
+func (g *PossessionGranter) GrantWeaponCapped(user *UserState, weaponId int32, nowMillis int64, giftTextId int32) {
+	if g.Limits.Weapon > 0 && len(user.Weapons) >= int(g.Limits.Weapon) {
+		g.sendOverflow(user, model.PossessionTypeWeapon, weaponId, 1, nowMillis, giftTextId)
+		return
+	}
+	g.GrantWeapon(user, weaponId, nowMillis)
+}
+
+// GrantExchangeAs grants duplicate exchange possessions; what would go past a
+// limit goes to the gift box with giftTextId.
+func (g *PossessionGranter) GrantExchangeAs(user *UserState, exchange []DuplicateExchange, nowMillis int64, giftTextId int32) {
+	g.grantExchange(user, exchange, nowMillis, giftTextId)
+}
+
+func (g *PossessionGranter) grantExchange(user *UserState, exchange []DuplicateExchange, nowMillis int64, giftTextId int32) {
+	for _, ex := range exchange {
+		g.GrantCapped(user, ex.PossessionType, ex.PossessionId, ex.Count, nowMillis, giftTextId)
 	}
 }
 
-func (g *PossessionGranter) GrantCostume(user *UserState, costumeId int32, nowMillis int64) {
+// stackLimit is how many of a stackable possession the player holds and its
+// MConfig limit; ok is false for possessions without a per-id count.
+func (g *PossessionGranter) stackLimit(user *UserState, possessionType model.PossessionType, possessionId int32) (have int64, limit int32, ok bool) {
+	switch possessionType {
+	case model.PossessionTypeMaterial:
+		return int64(user.Materials[possessionId]), g.Limits.Material, true
+	case model.PossessionTypeConsumableItem:
+		have = int64(user.ConsumableItems[possessionId])
+		switch {
+		case possessionId == g.GoldConsumableItemId:
+			return have, g.Limits.Money, true
+		case g.GachaMedalItemIds[possessionId]:
+			return have, g.Limits.GachaMedal, true
+		}
+		return have, g.Limits.ConsumableItem, true
+	case model.PossessionTypeImportantItem:
+		return int64(user.ImportantItems[possessionId]), g.Limits.ImportantItem, true
+	}
+	return 0, 0, false
+}
+
+// sendOverflow puts count of a possession in the gift box and records it in
+// user.Ext.GrantOverflow.
+func (g *PossessionGranter) sendOverflow(user *UserState, possessionType model.PossessionType, possessionId, count int32, nowMillis int64, giftTextId int32) {
+	if count <= 0 {
+		return
+	}
+	AddGift(user, possessionType, possessionId, count, giftTextId, nowMillis)
+	user.Ext.GrantOverflow = append(user.Ext.GrantOverflow, GrantOverflow{
+		PossessionType: possessionType,
+		PossessionId:   possessionId,
+		Count:          count,
+	})
+	log.Printf("[GrantFull] over the possession limit: type=%d id=%d count=%d -> gift box (text %d)", possessionType, possessionId, count, giftTextId)
+}
+
+// AddGift puts an unclaimed gift in the gift box. It expires after
+// GiftExpirationMillis like the login bonus gifts.
+func AddGift(user *UserState, possessionType model.PossessionType, possessionId, count, giftTextId int32, nowMillis int64) {
+	user.Gifts.NotReceived = append(user.Gifts.NotReceived, NotReceivedGiftState{
+		GiftCommon: GiftCommonState{
+			PossessionType:        int32(possessionType),
+			PossessionId:          possessionId,
+			Count:                 count,
+			GrantDatetime:         nowMillis,
+			DescriptionGiftTextId: giftTextId,
+		},
+		ExpirationDatetime: nowMillis + GiftExpirationMillis,
+		UserGiftUuid:       uuid.New().String(),
+	})
+	live := int32(0)
+	for _, gift := range user.Gifts.NotReceived {
+		if gift.ExpirationDatetime == 0 || gift.ExpirationDatetime >= nowMillis {
+			live++
+		}
+	}
+	user.Notifications.GiftNotReceiveCount = live
+}
+
+// TakeGrantOverflow returns what grants in this request sent to the gift box
+// because of a possession limit, and clears the list.
+func TakeGrantOverflow(user *UserState) []GrantOverflow {
+	out := user.Ext.GrantOverflow
+	user.Ext.GrantOverflow = nil
+	return out
+}
+
+func (g *PossessionGranter) grantCostumeEnhanced(user *UserState, costumeEnhancedId int32, nowMillis int64) {
+	ref, ok := g.CostumeEnhancedById[costumeEnhancedId]
+	if !ok {
+		log.Printf("[GrantFull] unknown costumeEnhancedId=%d, granted as a plain costume", costumeEnhancedId)
+		ref = CostumeEnhancedRef{CostumeId: costumeEnhancedId}
+	}
+	if !g.GrantCostume(user, ref.CostumeId, nowMillis) {
+		g.grantExchange(user, g.CostumeDuplicateExchange[ref.CostumeId], nowMillis, GiftTextDuplicateCostume)
+		return
+	}
+	var key string
+	for k, c := range user.Costumes {
+		if c.CostumeId == ref.CostumeId {
+			key = k
+			break
+		}
+	}
+	c := user.Costumes[key]
+	if ref.Level > 1 {
+		c.Level = ref.Level
+		if g.CostumeExpForLevel != nil {
+			c.Exp = g.CostumeExpForLevel(ref.CostumeId, ref.Level)
+		}
+	}
+	c.LimitBreakCount = ref.LimitBreakCount
+	c.AwakenCount = ref.AwakenCount
+	c.LatestVersion = nowMillis
+	user.Costumes[key] = c
+	if ref.ActiveSkillLevel > 1 {
+		skill := user.CostumeActiveSkills[key]
+		skill.Level = ref.ActiveSkillLevel
+		skill.LatestVersion = nowMillis
+		user.CostumeActiveSkills[key] = skill
+	}
+	if g.ApplyCostumeAwaken != nil {
+		for step := int32(1); step <= ref.AwakenCount; step++ {
+			g.ApplyCostumeAwaken(user, key, ref.CostumeId, step, nowMillis)
+		}
+	}
+}
+
+func (g *PossessionGranter) grantCompanionEnhanced(user *UserState, companionEnhancedId int32, nowMillis int64) {
+	ref, ok := g.CompanionEnhancedById[companionEnhancedId]
+	if !ok {
+		log.Printf("[GrantFull] unknown companionEnhancedId=%d, granted as a plain companion", companionEnhancedId)
+		ref = CompanionEnhancedRef{CompanionId: companionEnhancedId, Level: 1}
+	}
+	if !g.GrantCompanion(user, ref.CompanionId, nowMillis) {
+		g.grantExchange(user, g.CompanionDuplicateExchange[ref.CompanionId], nowMillis, GiftTextDuplicateCompanion)
+		return
+	}
+	for k, c := range user.Companions {
+		if c.CompanionId == ref.CompanionId {
+			c.Level = max(c.Level, ref.Level)
+			c.LatestVersion = nowMillis
+			user.Companions[k] = c
+			return
+		}
+	}
+}
+
+// WouldOverflow reports whether granting count of a possession would take the
+// player past an MConfig possession limit. For a costume or companion the
+// player owns, that is whether its duplicate exchange would.
+func (g *PossessionGranter) WouldOverflow(user *UserState, possessionType model.PossessionType, possessionId, count int32) bool {
+	n := int64(max(count, 1))
+	over := func(have int64, limit int32, add int64) bool {
+		return limit > 0 && have+add > int64(limit)
+	}
+	exchangeOver := func(exchange []DuplicateExchange) bool {
+		for _, ex := range exchange {
+			if have, limit, ok := g.stackLimit(user, ex.PossessionType, ex.PossessionId); ok && over(have, limit, int64(ex.Count)*n) {
+				return true
+			}
+		}
+		return false
+	}
+	switch possessionType {
+	case model.PossessionTypeWeapon, model.PossessionTypeWeaponEnhanced:
+		return over(int64(len(user.Weapons)), g.Limits.Weapon, n)
+	case model.PossessionTypeParts, model.PossessionTypePartsEnhanced:
+		return over(int64(len(user.Parts)), g.Limits.Parts, n)
+	case model.PossessionTypeCostume, model.PossessionTypeCostumeEnhanced:
+		costumeId := possessionId
+		if possessionType == model.PossessionTypeCostumeEnhanced {
+			if ref, ok := g.CostumeEnhancedById[possessionId]; ok {
+				costumeId = ref.CostumeId
+			}
+		}
+		for _, c := range user.Costumes {
+			if c.CostumeId == costumeId {
+				return exchangeOver(g.CostumeDuplicateExchange[costumeId])
+			}
+		}
+		return false
+	case model.PossessionTypeCompanion, model.PossessionTypeCompanionEnhanced:
+		companionId := possessionId
+		if possessionType == model.PossessionTypeCompanionEnhanced {
+			if ref, ok := g.CompanionEnhancedById[possessionId]; ok {
+				companionId = ref.CompanionId
+			}
+		}
+		for _, c := range user.Companions {
+			if c.CompanionId == companionId {
+				return exchangeOver(g.CompanionDuplicateExchange[companionId])
+			}
+		}
+		return false
+	}
+	have, limit, ok := g.stackLimit(user, possessionType, possessionId)
+	return ok && over(have, limit, n)
+}
+
+// GrantCostume adds the costume and reports whether it was new. An owned
+// costume is left alone; GrantFull converts it, and summons convert their own.
+func (g *PossessionGranter) GrantCostume(user *UserState, costumeId int32, nowMillis int64) bool {
 	for _, row := range user.Costumes {
 		if row.CostumeId == costumeId {
-			return
+			return false
 		}
 	}
 	if cm, ok := g.CostumeById[costumeId]; ok {
@@ -185,12 +536,14 @@ func (g *PossessionGranter) GrantCostume(user *UserState, costumeId int32, nowMi
 		Level:               1,
 		AcquisitionDatetime: nowMillis,
 	}
+	return true
 }
 
-func (g *PossessionGranter) GrantCompanion(user *UserState, companionId int32, nowMillis int64) {
+// GrantCompanion adds the companion and reports whether it was new.
+func (g *PossessionGranter) GrantCompanion(user *UserState, companionId int32, nowMillis int64) bool {
 	for _, row := range user.Companions {
 		if row.CompanionId == companionId {
-			return
+			return false
 		}
 	}
 	key := uuid.New().String()
@@ -201,6 +554,7 @@ func (g *PossessionGranter) GrantCompanion(user *UserState, companionId int32, n
 		HeadupDisplayViewId: 1,
 		AcquisitionDatetime: nowMillis,
 	}
+	return true
 }
 
 func (g *PossessionGranter) GrantParts(user *UserState, requestedPartsId int32, nowMillis int64) {
@@ -377,6 +731,27 @@ func (g *PossessionGranter) populateWeaponSkillsAbilities(user *UserState, weapo
 	}
 }
 
+// GrantThought adds a debris (possession type 14, IUserThought) and reports
+// whether it was new. A debris the player already has is not added again.
+func GrantThought(user *UserState, thoughtId int32, nowMillis int64) bool {
+	for _, t := range user.Thoughts {
+		if t.ThoughtId == thoughtId {
+			return false
+		}
+	}
+	if user.Thoughts == nil {
+		user.Thoughts = make(map[string]ThoughtState)
+	}
+	key := uuid.New().String()
+	user.Thoughts[key] = ThoughtState{
+		UserThoughtUuid:     key,
+		ThoughtId:           thoughtId,
+		AcquisitionDatetime: nowMillis,
+		LatestVersion:       nowMillis,
+	}
+	return true
+}
+
 func GrantWeaponStoryUnlock(user *UserState, weaponId, storyIndex int32, nowMillis int64) bool {
 	return grantWeaponStoryUnlock(user, weaponId, storyIndex, nowMillis)
 }
@@ -407,6 +782,21 @@ func grantWeaponStoryUnlock(user *UserState, weaponId, storyIndex int32, nowMill
 	}
 	return true
 }
+
+// DefaultDeckName returns the canonical default name of a deck slot:
+// "Deck N" (N = UserDeckNumber), matching the official server's seeded names
+// ("Deck 1", "Deck 2", ...). Every server-created default deck carries this
+// name so the client shows "Deck N" instead of its localized fallback composed
+// by CalculatorDeck.GetDefaultDeckName ("任务N" / "クエストN").
+func DefaultDeckName(userDeckNumber int32) string {
+	return fmt.Sprintf("Deck %d", userDeckNumber)
+}
+
+// InitialDeckNumbers are the quest-deck slot numbers the client always lists
+// (CalculatorDeck.kInitialDeckListDeckNumbers). Slot 1 carries the starter
+// formation; slots 2 and 3 start empty but must still carry their default
+// names, otherwise the client renders them through GetDefaultDeckName.
+var InitialDeckNumbers = [...]int32{1, 2, 3}
 
 func EnsureDefaultDeck(user *UserState, nowMillis int64) {
 	if len(user.Costumes) == 0 || len(user.Decks) > 0 {
@@ -439,13 +829,22 @@ func EnsureDefaultDeck(user *UserState, nowMillis int64) {
 		Power:                 100,
 		LatestVersion:         nowMillis,
 	}
-	user.Decks[DeckKey{DeckType: model.DeckTypeQuest, UserDeckNumber: 1}] = DeckState{
-		DeckType:                model.DeckTypeQuest,
-		UserDeckNumber:          1,
-		UserDeckCharacterUuid01: dcUuid,
-		Name:                    "Deck 1",
-		Power:                   100,
-		LatestVersion:           nowMillis,
+	// Seed every initial quest-deck slot the client lists, not just slot 1:
+	// a slot without a name is rendered with the client's localized default
+	// name, so each slot gets its "Deck N" name here. Slot 1 keeps the starter
+	// formation; the other slots start empty.
+	for _, n := range InitialDeckNumbers {
+		deck := DeckState{
+			DeckType:       model.DeckTypeQuest,
+			UserDeckNumber: n,
+			Name:           DefaultDeckName(n),
+			LatestVersion:  nowMillis,
+		}
+		if n == 1 {
+			deck.UserDeckCharacterUuid01 = dcUuid
+			deck.Power = 100
+		}
+		user.Decks[DeckKey{DeckType: model.DeckTypeQuest, UserDeckNumber: n}] = deck
 	}
 
 	if _, exists := user.DeckTypeNotes[model.DeckTypeQuest]; !exists {
@@ -475,7 +874,7 @@ func ApplyDeckReplacement(user *UserState, deckType model.DeckType, userDeckNumb
 	deck.DeckType = deckType
 	deck.UserDeckNumber = userDeckNumber
 	if deck.Name == "" {
-		deck.Name = fmt.Sprintf("Deck %d", userDeckNumber)
+		deck.Name = DefaultDeckName(userDeckNumber)
 	}
 	if deck.Power == 0 {
 		deck.Power = 100

@@ -43,7 +43,9 @@ func (h *QuestHandler) firstClearRewardGroupId(user *store.UserState, questDef m
 	return rewardGroupId
 }
 
-func (h *QuestHandler) evaluateFinishOutcome(user *store.UserState, questId int32, target campaign.QuestTarget, nowMillis int64) FinishOutcome {
+// evaluateFinishOutcome works out a winning finish's rewards. isReplay is a
+// main quest replay-flow run (event, extra and subjugation battles pass false).
+func (h *QuestHandler) evaluateFinishOutcome(user *store.UserState, questId int32, target campaign.QuestTarget, isReplay bool, nowMillis int64) FinishOutcome {
 	outcome := FinishOutcome{}
 	questState, ok := user.Quests[questId]
 	if !ok {
@@ -53,8 +55,6 @@ func (h *QuestHandler) evaluateFinishOutcome(user *store.UserState, questId int3
 	if !ok {
 		panic(fmt.Sprintf("unknown questId=%d for evaluateFinishOutcome", questId))
 	}
-
-	isReplay := model.IsReplayQuestFlowType(user.MainQuest.CurrentQuestFlowType)
 
 	if !questState.IsRewardGranted && !isReplay {
 		rewardGroupId := h.firstClearRewardGroupId(user, questDef)
@@ -77,56 +77,14 @@ func (h *QuestHandler) evaluateFinishOutcome(user *store.UserState, questId int3
 		}
 	}
 
-	// Mission rewards / BigWin are first-clear concepts. Reference
-	// IUserQuestMissionTable has no rows for replay-variant ids (30000+):
-	// the popup is empty on replay in the original game.
+	// Reference IUserQuestMissionTable has no rows for replay-variant ids
+	// (30000+): missions are not judged on a replay-flow run. Any other win,
+	// first clear or not, judges the missions still open.
 	if !isReplay {
-		pendingClearCount := 0
-		regularMissionCount := 0
-		for _, questMissionId := range h.MissionIdsByQuestId[questId] {
-			missionDef, ok := h.MissionById[questMissionId]
-			if !ok || model.QuestMissionConditionType(missionDef.QuestMissionConditionType) == model.QuestMissionConditionTypeComplete {
-				continue
-			}
-			regularMissionCount++
-
-			key := store.QuestMissionKey{QuestId: questId, QuestMissionId: questMissionId}
-			mission := user.QuestMissions[key]
-
-			if !mission.IsClear {
-				pendingClearCount++
-				outcome.MissionClearRewards = appendMissionRewards(
-					outcome.MissionClearRewards,
-					h.MissionRewardsByMissionId[missionDef.QuestMissionRewardId],
-				)
-			}
-		}
-
-		priorClearCount := regularMissionCount - pendingClearCount
-		// On our server every mission auto-clears, so priorClearCount + pendingClearCount
-		// always equals regularMissionCount. The two-variable form is kept to mirror the
-		// original game's intent where individual missions could fail their conditions.
-		allRegularWillClear := regularMissionCount > 0 && (priorClearCount+pendingClearCount) == regularMissionCount
-		if allRegularWillClear {
-			for _, questMissionId := range h.MissionIdsByQuestId[questId] {
-				missionDef, ok := h.MissionById[questMissionId]
-				if !ok || model.QuestMissionConditionType(missionDef.QuestMissionConditionType) != model.QuestMissionConditionTypeComplete {
-					continue
-				}
-				key := store.QuestMissionKey{QuestId: questId, QuestMissionId: questMissionId}
-				if !user.QuestMissions[key].IsClear {
-					outcome.MissionClearCompleteRewards = appendMissionRewards(
-						outcome.MissionClearCompleteRewards,
-						h.MissionRewardsByMissionId[missionDef.QuestMissionRewardId],
-					)
-					outcome.BigWinClearedQuestMissionIds = append(outcome.BigWinClearedQuestMissionIds, questMissionId)
-				}
-			}
-			outcome.IsBigWin = len(outcome.BigWinClearedQuestMissionIds) > 0
-		}
+		h.judgeQuestMissions(user, questId, &outcome)
 	}
 
-	outcome.DropRewards = h.computeDropRewards(questDef, target, nowMillis)
+	outcome.DropRewards = h.computeDropRewards(user, questDef, target, nowMillis)
 	return outcome
 }
 
@@ -178,11 +136,11 @@ func (h *QuestHandler) grantDropRewards(user *store.UserState, drops []RewardGra
 	}
 }
 
-func (h *QuestHandler) computeDropRewards(questDef masterdata.EntityMQuest, target campaign.QuestTarget, nowMillis int64) []RewardGrant {
+func (h *QuestHandler) computeDropRewards(user *store.UserState, questDef masterdata.EntityMQuest, target campaign.QuestTarget, nowMillis int64) []RewardGrant {
 	var drops []RewardGrant
 	var dropRate campaign.DropRateMul
 	if h.Campaigns != nil {
-		dropRate = h.Campaigns.QuestDropRate(target, h.campaignFilter(nowMillis))
+		dropRate = h.Campaigns.QuestDropRate(target, h.campaignFilter(user, nowMillis))
 	}
 	if questDef.QuestPickupRewardGroupId != 0 {
 		for _, dropId := range h.PickupRewardIdsByGroupId[questDef.QuestPickupRewardGroupId] {
@@ -195,7 +153,8 @@ func (h *QuestHandler) computeDropRewards(questDef masterdata.EntityMQuest, targ
 			}
 		}
 	}
-	return h.appendBonusDrops(drops, target, nowMillis)
+	drops = h.appendBonusDrops(user, drops, target, nowMillis)
+	return h.applyImportantItemDropCounts(user, drops, target, nowMillis, randInt64n)
 }
 
 func (h *QuestHandler) applyExpRewards(user *store.UserState, questId int32, nowMillis int64) {
@@ -210,7 +169,9 @@ func (h *QuestHandler) applyExpRewards(user *store.UserState, questId int32, now
 	log.Printf("[applyExpRewards] questId=%d user: +%d exp -> total=%d level=%d", questId, questDef.UserExp, user.Status.Exp, user.Status.Level)
 
 	if user.Status.Level > oldLevel {
-		if maxStamina, ok := h.MaxStaminaByLevel[user.Status.Level]; ok {
+		// A level-up fills stamina to the new maximum; stamina already
+		// above it is kept.
+		if maxStamina, ok := h.MaxStaminaByLevel[user.Status.Level]; ok && user.Status.StaminaMilliValue < maxStamina*1000 {
 			store.ReplenishStamina(user, maxStamina*1000, nowMillis)
 		}
 	}

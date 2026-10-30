@@ -551,6 +551,9 @@ func writeUserState(tx *sql.Tx, uid int64, u *store.UserState) error {
 			return err
 		}
 	}
+	if err := saveExt(tx, uid, u.Ext); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -715,8 +718,12 @@ func diffAndSave(tx *sql.Tx, uid int64, before, after *store.UserState) error {
 		}
 	}
 
+	sameObtain := func(a, b *store.ConsumableItemState) bool {
+		return (a == nil) == (b == nil) && (a == nil || *a == *b)
+	}
 	if before.Gacha.RewardAvailable != after.Gacha.RewardAvailable || before.Gacha.TodaysCurrentDrawCount != after.Gacha.TodaysCurrentDrawCount ||
-		before.Gacha.DailyMaxCount != after.Gacha.DailyMaxCount || before.Gacha.LastRewardDrawDate != after.Gacha.LastRewardDrawDate {
+		before.Gacha.DailyMaxCount != after.Gacha.DailyMaxCount || before.Gacha.LastRewardDrawDate != after.Gacha.LastRewardDrawDate ||
+		!sameObtain(before.Gacha.ConvertedGachaMedal.ObtainPossession, after.Gacha.ConvertedGachaMedal.ObtainPossession) {
 		var obtainItemId, obtainCount sql.NullInt64
 		if after.Gacha.ConvertedGachaMedal.ObtainPossession != nil {
 			obtainItemId = sql.NullInt64{Int64: int64(after.Gacha.ConvertedGachaMedal.ObtainPossession.ConsumableItemId), Valid: true}
@@ -1145,6 +1152,11 @@ func diffAndSave(tx *sql.Tx, uid int64, before, after *store.UserState) error {
 	for ver := range before.BigHuntWeeklyStatuses {
 		if _, ok := after.BigHuntWeeklyStatuses[ver]; !ok {
 			exec(`DELETE FROM user_big_hunt_weekly_statuses WHERE user_id=? AND big_hunt_weekly_version=?`, uid, ver)
+		}
+	}
+	if !before.Ext.Equal(after.Ext) {
+		if err := saveExt(tx, uid, after.Ext); err != nil {
+			return err
 		}
 	}
 

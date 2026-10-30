@@ -170,9 +170,10 @@ const (
 type UserQuestStateType int32
 
 const (
-	UserQuestStateTypeUnknown UserQuestStateType = 0
-	UserQuestStateTypeActive  UserQuestStateType = 1
-	UserQuestStateTypeCleared UserQuestStateType = 2
+	UserQuestStateTypeUnknown    UserQuestStateType = 0
+	UserQuestStateTypeActive     UserQuestStateType = 1
+	UserQuestStateTypeCleared    UserQuestStateType = 2
+	UserQuestStateTypeChallenged UserQuestStateType = 4 // lost or retired, never cleared
 )
 
 type SideStoryQuestStateType int32

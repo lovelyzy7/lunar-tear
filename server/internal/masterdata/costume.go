@@ -2,9 +2,11 @@ package masterdata
 
 import (
 	"fmt"
+	"log"
 	"sort"
 
 	"lunar-tear/server/internal/model"
+	"lunar-tear/server/internal/store"
 	"lunar-tear/server/internal/utils"
 )
 
@@ -207,4 +209,90 @@ func LoadCostumeCatalog(matCatalog *MaterialCatalog) (*CostumeCatalog, error) {
 	}
 
 	return catalog, nil
+}
+
+// ExpForLevel is the exp a costume has on reaching level (0 if unknown).
+func (c *CostumeCatalog) ExpForLevel(costumeId, level int32) int32 {
+	cm, ok := c.Costumes[costumeId]
+	if !ok {
+		return 0
+	}
+	thresholds := c.ExpByRarity[cm.RarityType]
+	if level < 0 || int(level) >= len(thresholds) {
+		return 0
+	}
+	return thresholds[level]
+}
+
+// ApplyAwakenStep applies the effect a costume gains at one awakening step:
+// a status up or a thought (abilities are resolved by the client).
+func (c *CostumeCatalog) ApplyAwakenStep(user *store.UserState, userCostumeUuid string, costumeId, step int32, nowMillis int64) {
+	awakenRow, ok := c.AwakenByCostumeId[costumeId]
+	if !ok {
+		return
+	}
+	effect, ok := c.AwakenEffectsByGroupAndStep[awakenRow.CostumeAwakenEffectGroupId][step]
+	if !ok {
+		return
+	}
+	switch model.CostumeAwakenEffectType(effect.CostumeAwakenEffectType) {
+	case model.CostumeAwakenEffectTypeStatusUp:
+		c.applyAwakenStatusUp(user, userCostumeUuid, effect.CostumeAwakenEffectId, nowMillis)
+	case model.CostumeAwakenEffectTypeAbility:
+		log.Printf("[CostumeCatalog] awaken: ability effect id=%d (client-resolved)", effect.CostumeAwakenEffectId)
+	case model.CostumeAwakenEffectTypeItemAcquire:
+		c.applyAwakenItemAcquire(user, effect.CostumeAwakenEffectId, nowMillis)
+	default:
+		log.Printf("[CostumeCatalog] awaken: unknown effect type=%d", effect.CostumeAwakenEffectType)
+	}
+}
+
+func (c *CostumeCatalog) applyAwakenStatusUp(user *store.UserState, costumeUuid string, statusUpGroupId int32, nowMillis int64) {
+	rows, ok := c.AwakenStatusUpByGroup[statusUpGroupId]
+	if !ok {
+		log.Printf("[CostumeCatalog] awaken: status up group %d not found", statusUpGroupId)
+		return
+	}
+
+	for _, row := range rows {
+		calcType := model.StatusCalculationType(row.StatusCalculationType)
+		key := store.CostumeAwakenStatusKey{
+			UserCostumeUuid:       costumeUuid,
+			StatusCalculationType: calcType,
+		}
+		state := user.CostumeAwakenStatusUps[key]
+		state.UserCostumeUuid = costumeUuid
+		state.StatusCalculationType = calcType
+
+		switch model.StatusKindType(row.StatusKindType) {
+		case model.StatusKindTypeHp:
+			state.Hp += row.EffectValue
+		case model.StatusKindTypeAttack:
+			state.Attack += row.EffectValue
+		case model.StatusKindTypeVitality:
+			state.Vitality += row.EffectValue
+		case model.StatusKindTypeAgility:
+			state.Agility += row.EffectValue
+		case model.StatusKindTypeCriticalRatio:
+			state.CriticalRatio += row.EffectValue
+		case model.StatusKindTypeCriticalAttack:
+			state.CriticalAttack += row.EffectValue
+		}
+
+		state.LatestVersion = nowMillis
+		user.CostumeAwakenStatusUps[key] = state
+	}
+}
+
+func (c *CostumeCatalog) applyAwakenItemAcquire(user *store.UserState, itemAcquireId int32, nowMillis int64) {
+	acq, ok := c.AwakenItemAcquireById[itemAcquireId]
+	if !ok {
+		log.Printf("[CostumeCatalog] awaken: item acquire id=%d not found", itemAcquireId)
+		return
+	}
+
+	if !store.GrantThought(user, acq.PossessionId, nowMillis) {
+		return
+	}
+	log.Printf("[CostumeCatalog] awaken: granted thought id=%d", acq.PossessionId)
 }

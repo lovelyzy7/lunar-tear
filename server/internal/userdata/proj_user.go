@@ -79,14 +79,28 @@ func init() {
 		return s
 	})
 	register("IUserLoginBonus", func(user store.UserState) string {
-		s, _ := utils.EncodeJSONMaps(map[string]any{
-			"userId":                      user.UserId,
-			"loginBonusId":                user.LoginBonus.LoginBonusId,
-			"currentPageNumber":           user.LoginBonus.CurrentPageNumber,
-			"currentStampNumber":          user.LoginBonus.CurrentStampNumber,
-			"latestRewardReceiveDatetime": user.LoginBonus.LatestRewardReceiveDatetime,
-			"latestVersion":               user.LoginBonus.LatestVersion,
-		})
+		// The everyday card, then the dated ones (Ext.EventLoginBonuses) by id.
+		cards := []store.UserLoginBonusState{user.LoginBonus}
+		ids := make([]int32, 0, len(user.Ext.EventLoginBonuses))
+		for id := range user.Ext.EventLoginBonuses {
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		for _, id := range ids {
+			cards = append(cards, user.Ext.EventLoginBonuses[id])
+		}
+		rows := make([]map[string]any, 0, len(cards))
+		for _, c := range cards {
+			rows = append(rows, map[string]any{
+				"userId":                      user.UserId,
+				"loginBonusId":                c.LoginBonusId,
+				"currentPageNumber":           c.CurrentPageNumber,
+				"currentStampNumber":          c.CurrentStampNumber,
+				"latestRewardReceiveDatetime": c.LatestRewardReceiveDatetime,
+				"latestVersion":               c.LatestVersion,
+			})
+		}
+		s, _ := utils.EncodeJSONMaps(rows...)
 		return s
 	})
 	register("IUserTutorialProgress", func(user store.UserState) string {

@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"slices"
 
 	pb "lunar-tear/server/gen/proto"
 	"lunar-tear/server/internal/gametime"
@@ -11,6 +13,8 @@ import (
 	"lunar-tear/server/internal/runtime"
 	"lunar-tear/server/internal/store"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -220,24 +224,61 @@ func (s *QuestServiceServer) SkipQuest(ctx context.Context, req *pb.SkipQuestReq
 	log.Printf("[QuestService] SkipQuest: questId=%d skipCount=%d useEffectItems=%d", req.QuestId, req.SkipCount, len(req.UseEffectItem))
 
 	nowMillis := gametime.NowMillis()
-	engine := s.holder.Get().QuestHandler
+	cat := s.holder.Get()
 	userId := CurrentUserId(ctx, s.users, s.sessions)
 	var outcome questflow.FinishOutcome
-	s.users.UpdateUser(userId, func(user *store.UserState) {
-		for _, item := range req.UseEffectItem {
-			log.Printf("[QuestService] SkipQuest UseEffectItem: consumableItemId=%d count=%d", item.ConsumableItemId, item.Count)
-			user.ConsumableItems[item.ConsumableItemId] -= item.Count
-			if user.ConsumableItems[item.ConsumableItemId] < 0 {
-				user.ConsumableItems[item.ConsumableItemId] = 0
-			}
-		}
-		outcome = engine.HandleQuestSkip(user, req.QuestId, req.SkipCount, nowMillis)
-	})
+	var skipErr error
+	if _, err := s.users.UpdateUser(userId, func(user *store.UserState) {
+		outcome, skipErr = skipQuests(cat, user, req.UseEffectItem, []*pb.SkipQuestInfo{{QuestId: req.QuestId, SkipCount: req.SkipCount}}, req.UserDeckNumber, nowMillis)
+	}); err != nil {
+		return nil, err
+	}
+	if skipErr != nil {
+		log.Printf("[QuestService] SkipQuest refused: %v", skipErr)
+		return nil, status.Error(codes.FailedPrecondition, skipErr.Error())
+	}
 
 	return &pb.SkipQuestResponse{
 		DropReward:               toProtoRewards(outcome.DropRewards),
 		UserStatusCampaignReward: []*pb.QuestReward{},
 	}, nil
+}
+
+// skipQuests runs one skip request on a copy of the save and keeps it only if
+// every part succeeds: the stamina items used with it (consumed and their
+// stamina recovered, as ConsumableItemService.UseEffectItem does), then each
+// quest's skips. A refused skip leaves the save untouched.
+func skipQuests(cat *runtime.Catalogs, user *store.UserState, items []*pb.UseEffectItem, quests []*pb.SkipQuestInfo, deckNumber int32, nowMillis int64) (questflow.FinishOutcome, error) {
+	trial := store.CloneUserState(*user)
+	maxStaminaMillis := cat.QuestHandler.MaxStaminaByLevel[trial.Status.Level] * 1000
+	for _, item := range items {
+		if item.Count <= 0 {
+			continue
+		}
+		if have := trial.ConsumableItems[item.ConsumableItemId]; have < item.Count {
+			return questflow.FinishOutcome{}, fmt.Errorf("%w: consumable item %d: have %d, use %d", questflow.ErrSkipRefused, item.ConsumableItemId, have, item.Count)
+		}
+		trial.ConsumableItems[item.ConsumableItemId] -= item.Count
+		if cat.ConsumableItem == nil {
+			continue
+		}
+		for _, effect := range cat.ConsumableItem.Effects[item.ConsumableItemId] {
+			if effect.EffectTargetType == model.EffectTargetStaminaRecovery {
+				millis := store.ResolveStaminaEffectMillis(effect.EffectValueType, effect.EffectValue, maxStaminaMillis)
+				store.RecoverStamina(&trial, millis*item.Count, maxStaminaMillis, nowMillis)
+			}
+		}
+	}
+	var total questflow.FinishOutcome
+	for _, q := range quests {
+		outcome, err := cat.QuestHandler.HandleQuestSkip(&trial, q.QuestId, q.SkipCount, deckNumber, nowMillis)
+		if err != nil {
+			return questflow.FinishOutcome{}, err
+		}
+		total.DropRewards = append(total.DropRewards, outcome.DropRewards...)
+	}
+	*user = trial
+	return total, nil
 }
 
 func (s *QuestServiceServer) SetRoute(ctx context.Context, req *pb.SetRouteRequest) (*pb.SetRouteResponse, error) {
@@ -266,13 +307,33 @@ func (s *QuestServiceServer) SetRoute(ctx context.Context, req *pb.SetRouteReque
 func (s *QuestServiceServer) SetQuestSceneChoice(ctx context.Context, req *pb.SetQuestSceneChoiceRequest) (*pb.SetQuestSceneChoiceResponse, error) {
 	log.Printf("[QuestService] SetQuestSceneChoice: questSceneId=%d choiceNumber=%d",
 		req.QuestSceneId, req.ChoiceNumber)
+	userId := CurrentUserId(ctx, s.users, s.sessions)
+	if _, err := s.users.UpdateUser(userId, func(user *store.UserState) {
+		if !recordSceneChoice(user, req.QuestSceneId, req.QuestFlowType, req.ChoiceNumber, gametime.NowMillis()) {
+			log.Printf("[QuestService] SetQuestSceneChoice: scene %d has no choice %d", req.QuestSceneId, req.ChoiceNumber)
+		}
+	}); err != nil {
+		return nil, err
+	}
 	return &pb.SetQuestSceneChoiceResponse{}, nil
 }
 
+// ResetLimitContentQuestProgress starts a Recollections of Dusk run over. The
+// client (Story.OnResetSideStoryProgressAsync) sends its RequestPlayChapterId
+// and RequestPlayQuestId: a side story quest (one difficulty run) or a quest
+// of the run. The run's three quests are reset, with the chapter's deck locks.
 func (s *QuestServiceServer) ResetLimitContentQuestProgress(ctx context.Context, req *pb.ResetLimitContentQuestProgressRequest) (*pb.ResetLimitContentQuestProgressResponse, error) {
 	log.Printf("[QuestService] ResetLimitContentQuestProgress: eventQuestChapterId=%d questId=%d",
 		req.EventQuestChapterId, req.QuestId)
 
+	cat := s.holder.Get()
+	engine := cat.QuestHandler
+	quests := engine.LimitContentRunQuests(req.EventQuestChapterId, req.QuestId)
+	if cat.SideStory != nil {
+		if info := cat.SideStory.QuestById[req.QuestId]; info != nil && len(info.Quests) > 0 {
+			quests = info.Quests
+		}
+	}
 	userId := CurrentUserId(ctx, s.users, s.sessions)
 	nowMillis := gametime.NowMillis()
 	s.users.UpdateUser(userId, func(user *store.UserState) {
@@ -284,9 +345,9 @@ func (s *QuestServiceServer) ResetLimitContentQuestProgress(ctx context.Context,
 			}
 		}
 
-		delete(user.QuestLimitContentStatus, req.QuestId)
+		engine.ResetLimitContentRun(user, req.EventQuestChapterId, quests)
 
-		if user.SideStoryActiveProgress.CurrentSideStoryQuestId == req.QuestId {
+		if cur := user.SideStoryActiveProgress.CurrentSideStoryQuestId; cur == req.QuestId || slices.Contains(quests, cur) {
 			user.SideStoryActiveProgress = store.SideStoryActiveProgress{
 				LatestVersion: nowMillis,
 			}

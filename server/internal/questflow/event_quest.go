@@ -15,10 +15,11 @@ func (h *QuestHandler) HandleEventQuestStart(user *store.UserState, eventQuestCh
 	}
 
 	h.initQuestState(user, questId)
+	ResetBattleStats(user)
 
 	if quest.Stamina > 0 {
 		maxMillis := h.MaxStaminaByLevel[user.Status.Level] * 1000
-		stamina := h.staminaWithCampaign(quest.Stamina, h.targetForEvent(eventQuestChapterId, questId), nowMillis)
+		stamina := h.staminaWithCampaign(user, quest.Stamina, h.targetForEvent(eventQuestChapterId, questId), nowMillis)
 		store.ConsumeStamina(user, stamina, maxMillis, nowMillis)
 	}
 
@@ -46,27 +47,28 @@ func (h *QuestHandler) HandleEventQuestFinish(user *store.UserState, eventQuestC
 	target := h.targetForEvent(eventQuestChapterId, questId)
 	var outcome FinishOutcome
 	if !isRetired && !isAnnihilated {
-		outcome = h.evaluateFinishOutcome(user, questId, target, nowMillis)
+		outcome = h.evaluateFinishOutcome(user, questId, target, false, nowMillis)
 		h.applyQuestVictory(user, questId, &outcome, nowMillis, false)
 		h.recordSideStoryLimitContentStatus(user, questId, nowMillis)
+		h.recordLimitContentWin(user, eventQuestChapterId, questId, nowMillis)
 	}
 
-	consumed := h.staminaWithCampaign(quest.Stamina, target, nowMillis)
+	consumed := h.staminaWithCampaign(user, quest.Stamina, target, nowMillis)
 	if isRetired && !isAnnihilated && consumed > 1 {
 		refund := consumed - 1
 		maxMillis := h.MaxStaminaByLevel[user.Status.Level] * 1000
 		store.RecoverStamina(user, refund*1000, maxMillis, nowMillis)
 	}
 
-	restoreClearedAfterRetire(user, questId, isRetired)
+	if isRetired || isAnnihilated {
+		settleLostQuestState(user, questId)
+	}
 
 	user.EventQuest.CurrentEventQuestChapterId = 0
 	user.EventQuest.CurrentQuestId = 0
 	user.EventQuest.CurrentQuestSceneId = 0
 	user.EventQuest.HeadQuestSceneId = 0
 	user.EventQuest.LatestVersion = nowMillis
-
-	h.clearQuestMissions(user, questId, nowMillis)
 
 	return outcome
 }

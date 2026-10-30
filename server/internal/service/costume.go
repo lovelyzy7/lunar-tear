@@ -6,14 +6,11 @@ import (
 	"log"
 	"math/rand"
 
-	"github.com/google/uuid"
-
 	pb "lunar-tear/server/gen/proto"
 	"lunar-tear/server/internal/campaign"
 	"lunar-tear/server/internal/gametime"
 	"lunar-tear/server/internal/gameutil"
 	"lunar-tear/server/internal/masterdata"
-	"lunar-tear/server/internal/model"
 	"lunar-tear/server/internal/runtime"
 	"lunar-tear/server/internal/store"
 )
@@ -38,6 +35,7 @@ func (s *CostumeServiceServer) Enhance(ctx context.Context, req *pb.EnhanceReque
 	userId := CurrentUserId(ctx, s.users, s.sessions)
 	nowMillis := gametime.NowMillis()
 
+	var great bool
 	_, err := s.users.UpdateUser(userId, func(user *store.UserState) {
 		costume, ok := user.Costumes[req.UserCostumeUuid]
 		if !ok {
@@ -51,11 +49,11 @@ func (s *CostumeServiceServer) Enhance(ctx context.Context, req *pb.EnhanceReque
 			return
 		}
 
-		expBonus := cat.Campaign.CostumeExpBonus(campaign.CostumeTarget{
+		greatRate := cat.Campaign.CostumeGreatSuccessBonus(campaign.CostumeTarget{
 			CostumeId:          costume.CostumeId,
 			CharacterId:        cm.CharacterId,
 			SkillfulWeaponType: cm.SkillfulWeaponType,
-		}, campaign.Filter{NowMillis: nowMillis, UserStatus: campaign.TargetUserStatusAll})
+		}, campaign.FilterFor(user, nowMillis))
 
 		totalExp := int32(0)
 		totalMaterialCount := int32(0)
@@ -78,7 +76,7 @@ func (s *CostumeServiceServer) Enhance(ctx context.Context, req *pb.EnhanceReque
 			if mat.WeaponType != 0 && mat.WeaponType == cm.SkillfulWeaponType {
 				expPerUnit = expPerUnit * config.MaterialSameWeaponExpCoefficientPermil / 1000
 			}
-			totalExp += expBonus.Apply(expPerUnit * count)
+			totalExp += expPerUnit * count
 		}
 
 		if costFunc, ok := catalog.EnhanceCostByRarity[cm.RarityType]; ok && totalMaterialCount > 0 {
@@ -87,6 +85,7 @@ func (s *CostumeServiceServer) Enhance(ctx context.Context, req *pb.EnhanceReque
 			log.Printf("[CostumeService] Enhance: gold cost=%d (materials=%d)", goldCost, totalMaterialCount)
 		}
 
+		totalExp, great = rollGreatSuccess(totalExp, greatRate.Apply(greatSuccessBasePermil), greatSuccessRand)
 		costume.Exp += totalExp
 
 		if thresholds, ok := catalog.ExpByRarity[cm.RarityType]; ok {
@@ -107,7 +106,7 @@ func (s *CostumeServiceServer) Enhance(ctx context.Context, req *pb.EnhanceReque
 	}
 
 	return &pb.EnhanceResponse{
-		IsGreatSuccess:         false,
+		IsGreatSuccess:         great,
 		SurplusEnhanceMaterial: map[int32]int32{},
 	}, nil
 }
@@ -155,90 +154,13 @@ func (s *CostumeServiceServer) Awaken(ctx context.Context, req *pb.AwakenRequest
 		user.Costumes[req.UserCostumeUuid] = costume
 		log.Printf("[CostumeService] Awaken: costumeId=%d awakenCount=%d", costume.CostumeId, nextStep)
 
-		effectSteps, ok := catalog.AwakenEffectsByGroupAndStep[awakenRow.CostumeAwakenEffectGroupId]
-		if !ok {
-			return
-		}
-		effect, ok := effectSteps[nextStep]
-		if !ok {
-			return
-		}
-
-		switch model.CostumeAwakenEffectType(effect.CostumeAwakenEffectType) {
-		case model.CostumeAwakenEffectTypeStatusUp:
-			applyCostumeAwakenStatusUp(catalog, user, req.UserCostumeUuid, effect.CostumeAwakenEffectId, nowMillis)
-		case model.CostumeAwakenEffectTypeAbility:
-			log.Printf("[CostumeService] Awaken: ability effect id=%d (client-resolved)", effect.CostumeAwakenEffectId)
-		case model.CostumeAwakenEffectTypeItemAcquire:
-			applyCostumeAwakenItemAcquire(catalog, user, effect.CostumeAwakenEffectId, nowMillis)
-		default:
-			log.Printf("[CostumeService] Awaken: unknown effect type=%d", effect.CostumeAwakenEffectType)
-		}
+		catalog.ApplyAwakenStep(user, req.UserCostumeUuid, costume.CostumeId, nextStep, nowMillis)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("costume awaken: %w", err)
 	}
 
 	return &pb.AwakenResponse{}, nil
-}
-
-func applyCostumeAwakenStatusUp(catalog *masterdata.CostumeCatalog, user *store.UserState, costumeUuid string, statusUpGroupId int32, nowMillis int64) {
-	rows, ok := catalog.AwakenStatusUpByGroup[statusUpGroupId]
-	if !ok {
-		log.Printf("[CostumeService] Awaken: status up group %d not found", statusUpGroupId)
-		return
-	}
-
-	for _, row := range rows {
-		calcType := model.StatusCalculationType(row.StatusCalculationType)
-		key := store.CostumeAwakenStatusKey{
-			UserCostumeUuid:       costumeUuid,
-			StatusCalculationType: calcType,
-		}
-		state := user.CostumeAwakenStatusUps[key]
-		state.UserCostumeUuid = costumeUuid
-		state.StatusCalculationType = calcType
-
-		switch model.StatusKindType(row.StatusKindType) {
-		case model.StatusKindTypeHp:
-			state.Hp += row.EffectValue
-		case model.StatusKindTypeAttack:
-			state.Attack += row.EffectValue
-		case model.StatusKindTypeVitality:
-			state.Vitality += row.EffectValue
-		case model.StatusKindTypeAgility:
-			state.Agility += row.EffectValue
-		case model.StatusKindTypeCriticalRatio:
-			state.CriticalRatio += row.EffectValue
-		case model.StatusKindTypeCriticalAttack:
-			state.CriticalAttack += row.EffectValue
-		}
-
-		state.LatestVersion = nowMillis
-		user.CostumeAwakenStatusUps[key] = state
-	}
-}
-
-func applyCostumeAwakenItemAcquire(catalog *masterdata.CostumeCatalog, user *store.UserState, itemAcquireId int32, nowMillis int64) {
-	acq, ok := catalog.AwakenItemAcquireById[itemAcquireId]
-	if !ok {
-		log.Printf("[CostumeService] Awaken: item acquire id=%d not found", itemAcquireId)
-		return
-	}
-
-	for _, t := range user.Thoughts {
-		if t.ThoughtId == acq.PossessionId {
-			return
-		}
-	}
-	key := uuid.New().String()
-	user.Thoughts[key] = store.ThoughtState{
-		UserThoughtUuid:     key,
-		ThoughtId:           acq.PossessionId,
-		AcquisitionDatetime: nowMillis,
-		LatestVersion:       nowMillis,
-	}
-	log.Printf("[CostumeService] Awaken: granted thought id=%d", acq.PossessionId)
 }
 
 func (s *CostumeServiceServer) EnhanceActiveSkill(ctx context.Context, req *pb.EnhanceActiveSkillRequest) (*pb.EnhanceActiveSkillResponse, error) {

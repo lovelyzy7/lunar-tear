@@ -61,10 +61,33 @@ func (h *GachaHandler) HandleDraw(
 		return nil, err
 	}
 
+	// A multi-step summon draws only its current step.
+	if entry.GachaModeType == model.GachaModeStepup {
+		if step := CurrentStep(entry, user.Gacha.BannerStates[entry.GachaId]); phase.StepNumber != step {
+			return nil, fmt.Errorf("gacha %d: step %d drawn on step %d", entry.GachaId, phase.StepNumber, step)
+		}
+	}
+
+	// Options with a limit (free once a day, one-time guaranteed). Multi-step
+	// summons limit each step through their step number instead.
+	limited := phase.LimitExecCount > 0 && entry.GachaModeType != model.GachaModeStepup
+	if limited {
+		used := ExecCount(user, entry, phase.PhaseId)
+		if used+execCount > phase.LimitExecCount {
+			return nil, fmt.Errorf("gacha %d phase %d: limit of %d reached", entry.GachaId, phase.PhaseId, phase.LimitExecCount)
+		}
+	}
+
+	if err := checkBoxDraw(user, entry, int(phase.DrawCount*execCount), gametime.NowMillis()); err != nil {
+		return nil, err
+	}
+
+	// DeductPrice checks the balance before it changes anything, so a failed
+	// payment leaves the user as it was.
 	totalCost := phase.Price * execCount
 	if totalCost > 0 {
 		if err := store.DeductPrice(user, phase.PriceType, phase.PriceId, totalCost); err != nil {
-			log.Printf("[GachaHandler] DeductPrice failed (proceeding): %v", err)
+			return nil, fmt.Errorf("gacha %d phase %d: %w", entry.GachaId, phase.PhaseId, err)
 		}
 	}
 
@@ -80,7 +103,11 @@ func (h *GachaHandler) HandleDraw(
 	case model.GachaLabelPremium:
 		items = h.drawPremium(entry, phase, drawCount)
 	case model.GachaLabelChapter, model.GachaLabelRecycle:
-		items = h.drawMaterial(drawCount)
+		if len(entry.BoxContents) > 0 {
+			items = drawFixedBox(user, entry, &bs, drawCount, nowMillis)
+		} else {
+			items = h.drawMaterial(drawCount)
+		}
 	case model.GachaLabelEvent:
 		items = h.drawBox(&bs, drawCount)
 	default:
@@ -88,7 +115,7 @@ func (h *GachaHandler) HandleDraw(
 	}
 
 	if entry.GachaModeType == model.GachaModeStepup {
-		bs.StepNumber++
+		bs.StepNumber = CurrentStep(entry, bs) + 1
 		if bs.StepNumber > entry.MaxStepNumber {
 			bs.StepNumber = 1
 			bs.LoopCount++
@@ -98,14 +125,19 @@ func (h *GachaHandler) HandleDraw(
 	var medalBonus int32
 	if entry.GachaMedalId != 0 {
 		medalBonus = int32(drawCount)
-		bs.MedalCount += medalBonus
-		if bs.MedalCount > model.MedalCountCap {
-			bs.MedalCount = model.MedalCountCap
-		}
+		bs.MedalCount = min(bs.MedalCount+medalBonus, h.medalCountCap())
 	}
 
 	bs.DrawCount += int32(drawCount)
 	user.Gacha.BannerStates[entry.GachaId] = bs
+	if limited {
+		if user.Ext.GachaExec == nil {
+			user.Ext.GachaExec = map[int32]store.GachaExecState{}
+		}
+		user.Ext.GachaExec[phase.PhaseId] = store.GachaExecState{
+			Count: ExecCount(user, entry, phase.PhaseId) + execCount, Day: gametime.StartOfDay(nowMillis),
+		}
+	}
 
 	dupInfos := h.grantItems(user, items, nowMillis)
 
@@ -125,23 +157,37 @@ func (h *GachaHandler) HandleDraw(
 	}
 
 	for _, p := range phase.Bonuses {
-		store.GrantPossession(user, model.PossessionType(p.PossessionType), p.PossessionId, p.Count)
+		h.Granter.GrantCapped(user, model.PossessionType(p.PossessionType), p.PossessionId, p.Count, nowMillis, store.GiftTextSummons)
 		result.Bonuses = append(result.Bonuses, p)
 	}
 
 	if medalBonus > 0 && entry.MedalConsumableItemId != 0 {
-		store.GrantPossession(user, model.PossessionTypeConsumableItem, entry.MedalConsumableItemId, medalBonus)
+		h.Granter.GrantCapped(user, model.PossessionTypeConsumableItem, entry.MedalConsumableItemId, medalBonus, nowMillis, store.GiftTextSummons)
 	}
 
 	return result, nil
+}
+
+// medalCountCap is MConfig POSSESSION_COUNT_LIMIT_GACHA_MEDAL.
+func (h *GachaHandler) medalCountCap() int32 {
+	if h.Config != nil && h.Config.PossessionCountLimitGachaMedal > 0 {
+		return h.Config.PossessionCountLimitGachaMedal
+	}
+	return model.MedalCountCap
 }
 
 func (h *GachaHandler) HandleResetBox(
 	user *store.UserState,
 	entry store.GachaCatalogEntry,
 ) error {
+	if len(entry.BoxContents) > 0 && !canResetBox(user, entry, gametime.NowMillis()) {
+		return fmt.Errorf("gacha %d: the box can be reset once its targets are drawn", entry.GachaId)
+	}
 	bs := user.Gacha.BannerStates[entry.GachaId]
 	bs.BoxDrewCounts = make(map[int32]int32)
+	if bs.BoxNumber < 1 {
+		bs.BoxNumber = 1
+	}
 	bs.BoxNumber++
 	user.Gacha.BannerStates[entry.GachaId] = bs
 	return nil
@@ -282,29 +328,29 @@ func (h *GachaHandler) grantItems(user *store.UserState, items []DrawnItem, nowM
 	for i, item := range items {
 		switch model.PossessionType(item.PossessionType) {
 		case model.PossessionTypeCostume:
-			if dup, ok := h.tryCostumeDupExchange(user, item, i); ok {
+			if dup, ok := h.tryCostumeDupExchange(user, item, i, nowMillis); ok {
 				dupInfos = append(dupInfos, dup)
 				continue
 			}
 			h.Granter.GrantCostume(user, item.PossessionId, nowMillis)
 		case model.PossessionTypeWeapon:
-			h.Granter.GrantWeapon(user, item.PossessionId, nowMillis)
+			h.Granter.GrantWeaponCapped(user, item.PossessionId, nowMillis, store.GiftTextSummons)
 		default:
 			if item.PossessionType != 0 {
-				store.GrantPossession(user, model.PossessionType(item.PossessionType), item.PossessionId, 1)
+				h.Granter.GrantCapped(user, model.PossessionType(item.PossessionType), item.PossessionId, 1, nowMillis, store.GiftTextSummons)
 			}
 		}
 	}
 	return dupInfos
 }
 
-func (h *GachaHandler) tryCostumeDupExchange(user *store.UserState, item DrawnItem, index int) (DuplicateInfo, bool) {
+func (h *GachaHandler) tryCostumeDupExchange(user *store.UserState, item DrawnItem, index int, nowMillis int64) (DuplicateInfo, bool) {
 	for _, c := range user.Costumes {
 		if c.CostumeId == item.PossessionId {
 			grade := int32(rand.Intn(model.DupGradeRange) + int(model.DupGradeMin))
 			exchanges := h.DupExchange[item.PossessionId]
 			for _, ex := range exchanges {
-				store.GrantPossession(user, model.PossessionType(ex.PossessionType), ex.PossessionId, ex.Count)
+				h.Granter.GrantCapped(user, model.PossessionType(ex.PossessionType), ex.PossessionId, ex.Count, nowMillis, store.GiftTextSummons)
 			}
 			return DuplicateInfo{Index: index, Grade: grade, Bonuses: exchanges}, true
 		}
@@ -346,4 +392,14 @@ func findPhase(entry store.GachaCatalogEntry, phaseId int32) (store.GachaPricePh
 		return entry.PricePhases[0], nil
 	}
 	return store.GachaPricePhaseEntry{}, fmt.Errorf("no price phases for gacha %d", entry.GachaId)
+}
+
+// ExecCount is how many times the user has drawn a limited price option; a
+// daily summon's count is for the current game day only.
+func ExecCount(user *store.UserState, entry store.GachaCatalogEntry, phaseId int32) int32 {
+	st := user.Ext.GachaExec[phaseId]
+	if entry.GachaAutoResetType == model.GachaAutoResetDaily && st.Day != gametime.StartOfDay(gametime.NowMillis()) {
+		return 0
+	}
+	return st.Count
 }

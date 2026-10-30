@@ -17,21 +17,13 @@ func Open(path string) (*sql.DB, error) {
 		}
 	}
 
-	db, err := sql.Open("sqlite", path)
+	// Pragmas go in the DSN so that every connection the pool opens gets
+	// them: busy_timeout and foreign_keys are per connection, and a PRAGMA
+	// run once through db.Exec only reaches one of them.
+	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
-	}
-
-	pragmas := []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA foreign_keys=ON",
-		"PRAGMA busy_timeout=5000",
-	}
-	for _, p := range pragmas {
-		if _, err := db.Exec(p); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("exec %q: %w", p, err)
-		}
 	}
 
 	if err := db.Ping(); err != nil {

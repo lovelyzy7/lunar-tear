@@ -111,28 +111,34 @@ func (s *LabyrinthServiceServer) ReceiveStageClearReward(ctx context.Context, re
 	return &pb.ReceiveStageClearRewardResponse{}, nil
 }
 
+// UpdateSeasonData is called when the player opens a labyrinth whose open
+// season they haven't joined: it pays the ended season's reward (the client
+// plays it as the "reach reward") and joins the new season, which starts the
+// climb again (see bunker_labyrinth.go).
 func (s *LabyrinthServiceServer) UpdateSeasonData(ctx context.Context, req *pb.UpdateSeasonDataRequest) (*pb.UpdateSeasonDataResponse, error) {
-	laby := s.holder.Get().Labyrinth
+	cat := s.holder.Get()
+	laby := cat.Labyrinth
+	granter := cat.QuestHandler.Granter
+	now := gametime.NowMillis()
+	userId := CurrentUserId(ctx, s.users, s.sessions)
 
-	var seasonResult []*pb.LabyrinthSeasonResult
-	for _, m := range laby.SeasonMilestones(req.EventQuestChapterId) {
-		rewards := make([]*pb.LabyrinthReward, 0, len(m.Rewards))
-		for _, it := range m.Rewards {
-			rewards = append(rewards, &pb.LabyrinthReward{
-				PossessionType: it.PossessionType,
-				PossessionId:   it.PossessionId,
-				Count:          it.Count,
-			})
+	seasonResult := []*pb.LabyrinthSeasonResult{}
+	joined := false
+	if _, err := s.users.UpdateUser(userId, func(u *store.UserState) {
+		for _, ch := range laby.ChaptersByOrder {
+			if ch.EventQuestChapterId != req.EventQuestChapterId {
+				continue
+			}
+			if result := settleLabyrinthSeason(laby, granter, u, ch, now); result != nil {
+				seasonResult = append(seasonResult, result)
+			}
+			joined = joinLabyrinthSeason(u, ch.EventQuestChapterId, now)
 		}
-		seasonResult = append(seasonResult, &pb.LabyrinthSeasonResult{
-			EventQuestChapterId: req.EventQuestChapterId,
-			HeadQuestId:         m.HeadQuestId,
-			SeasonReward:        rewards,
-			HeadStageOrder:      m.HeadStageOrder,
-		})
+	}); err != nil {
+		return nil, err
 	}
 
-	log.Printf("[LabyrinthService] UpdateSeasonData: chapter=%d -> %d milestone(s)",
-		req.EventQuestChapterId, len(seasonResult))
+	log.Printf("[LabyrinthService] UpdateSeasonData: chapter=%d paid %d season reward(s), new season %v",
+		req.EventQuestChapterId, len(seasonResult), joined)
 	return &pb.UpdateSeasonDataResponse{SeasonResult: seasonResult}, nil
 }

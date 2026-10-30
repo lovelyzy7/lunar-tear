@@ -39,6 +39,10 @@ type QuestCatalog struct {
 	BattleOnlyTargetSceneByQuestId     map[int32]int32
 	MainQuestChapterIdByQuestId        map[int32]int32
 	EventQuestTypeByChapterId          map[int32]int32
+	MissionConditionValues             map[int32][]int32 // QuestMissionConditionValueGroupId -> values by SortOrder
+	QuestBonus                         *QuestBonusCatalog
+	ImportantItemEffects               *ImportantItemEffectCatalog
+	LimitContent                       *LimitContentCatalog
 
 	UserExpThresholds       []int32
 	CharacterExpThresholds  []int32
@@ -577,6 +581,33 @@ func LoadQuestCatalog(partsCatalog *PartsCatalog) (*QuestCatalog, error) {
 		}
 	}
 
+	missionValueRows, err := utils.ReadTable[EntityMQuestMissionConditionValueGroup]("m_quest_mission_condition_value_group")
+	if err != nil {
+		return nil, fmt.Errorf("load quest mission condition value group table: %w", err)
+	}
+	sort.Slice(missionValueRows, func(i, j int) bool {
+		if missionValueRows[i].QuestMissionConditionValueGroupId != missionValueRows[j].QuestMissionConditionValueGroupId {
+			return missionValueRows[i].QuestMissionConditionValueGroupId < missionValueRows[j].QuestMissionConditionValueGroupId
+		}
+		return missionValueRows[i].SortOrder < missionValueRows[j].SortOrder
+	})
+	missionConditionValues := make(map[int32][]int32)
+	for _, r := range missionValueRows {
+		missionConditionValues[r.QuestMissionConditionValueGroupId] = append(missionConditionValues[r.QuestMissionConditionValueGroupId], r.ConditionValue)
+	}
+	questBonus, err := LoadQuestBonusCatalog()
+	if err != nil {
+		return nil, err
+	}
+	importantItemEffects, err := LoadImportantItemEffectCatalog()
+	if err != nil {
+		return nil, err
+	}
+	limitContent, err := LoadLimitContentCatalog()
+	if err != nil {
+		return nil, err
+	}
+
 	return &QuestCatalog{
 		SceneById:                          sceneById,
 		MissionById:                        missionById,
@@ -604,6 +635,10 @@ func LoadQuestCatalog(partsCatalog *PartsCatalog) (*QuestCatalog, error) {
 		BattleOnlyTargetSceneByQuestId:     battleOnlyTargetSceneByQuestId,
 		MainQuestChapterIdByQuestId:        mainQuestChapterIdByQuestId,
 		EventQuestTypeByChapterId:          eventQuestTypeByChapterId,
+		MissionConditionValues:             missionConditionValues,
+		QuestBonus:                         questBonus,
+		ImportantItemEffects:               importantItemEffects,
+		LimitContent:                       limitContent,
 
 		UserExpThresholds:       BuildExpThresholds(paramMapRows, 1),
 		CharacterExpThresholds:  BuildExpThresholds(paramMapRows, 31),

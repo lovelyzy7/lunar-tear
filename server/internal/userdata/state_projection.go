@@ -13,7 +13,11 @@ func FullClientTableMap(user store.UserState) map[string]string {
 		"IUserStatus":                             projectTable("IUserStatus", user),
 		"IUserGem":                                projectTable("IUserGem", user),
 		"IUserProfile":                            projectTable("IUserProfile", user),
+		"IUserPvpDefenseDeck":                     projectTable("IUserPvpDefenseDeck", user),
+		"IUserPvpStatus":                          projectTable("IUserPvpStatus", user),
+		"IUserPvpWeeklyResult":                    projectTable("IUserPvpWeeklyResult", user),
 		"IUserCharacter":                          projectTable("IUserCharacter", user),
+		"IUserCharacterCostumeLevelBonus":         projectTable("IUserCharacterCostumeLevelBonus", user),
 		"IUserCostume":                            projectTable("IUserCostume", user),
 		"IUserWeapon":                             projectTable("IUserWeapon", user),
 		"IUserWeaponStory":                        projectTable("IUserWeaponStory", user),
@@ -25,6 +29,7 @@ func FullClientTableMap(user store.UserState) map[string]string {
 		"IUserLogin":                              projectTable("IUserLogin", user),
 		"IUserLoginBonus":                         projectTable("IUserLoginBonus", user),
 		"IUserMission":                            projectTable("IUserMission", user),
+		"IUserMissionPassPoint":                   projectTable("IUserMissionPassPoint", user),
 		"IUserMainQuestFlowStatus":                projectTable("IUserMainQuestFlowStatus", user),
 		"IUserMainQuestMainFlowStatus":            projectTable("IUserMainQuestMainFlowStatus", user),
 		"IUserMainQuestProgressStatus":            projectTable("IUserMainQuestProgressStatus", user),
@@ -103,6 +108,7 @@ func FullClientTableMap(user store.UserState) map[string]string {
 		"IUserFacebook":                           projectTable("IUserFacebook", user),
 		"IUserApple":                              projectTable("IUserApple", user),
 		"IUserWebviewPanelMission":                projectTable("IUserWebviewPanelMission", user),
+		"IUserCharacterViewerField":               projectTable("IUserCharacterViewerField", user),
 	}
 }
 

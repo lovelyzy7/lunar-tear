@@ -36,7 +36,7 @@ func (s *OmikujiServiceServer) OmikujiDraw(ctx context.Context, req *pb.OmikujiD
 	}
 
 	return &pb.OmikujiDrawResponse{
-		OmikujiResultAssetId: s.holder.Get().Omikuji.LookupAssetId(req.OmikujiId),
+		OmikujiResultAssetId: s.holder.Get().Omikuji.DrawFortune(req.OmikujiId),
 		OmikujiItem:          []*pb.OmikujiItem{},
 	}, nil
 }
