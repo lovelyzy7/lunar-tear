@@ -13,17 +13,10 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
-// masterDataBinPath / masterDataBaseVersion 可用环境变量覆盖，便于将来
-// 多区域（EN/JP）分别配置；不配置时保持原有 EN 默认值。
-//
-//	LUNAR_MASTERDATA          主数据文件路径（默认 assets/release/20240404193219.bin.e）
-//	LUNAR_MASTERDATA_VERSION  对外返回的版本号前缀（默认 20240404193219）
-//
-// 文件 mtime 会被拼接进版本号，以便管理员替换主数据后客户端自动失效缓存。
-var (
-	masterDataBinPath     = envOr("LUNAR_MASTERDATA", "assets/release/20240404193219.bin.e")
-	masterDataBaseVersion = envOr("LUNAR_MASTERDATA_VERSION", "20240404193219")
-)
+// 主数据按区域拆分（JP=assets/release/20240405123139.bin.e，
+// GL=assets/release/20240404193219.bin.e），版本串与文件映射见 region.go。
+// 环境变量 LUNAR_MASTERDATA / LUNAR_MASTERDATA_VERSION 保留为显式覆盖
+// （单区/自定义兼容）；文件 mtime 依旧拼进版本号，热重载后客户端自动失效缓存。
 
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -43,13 +36,17 @@ func NewDataServiceServer(users store.UserRepository, sessions store.SessionRepo
 }
 
 func (s *DataServiceServer) GetLatestMasterDataVersion(ctx context.Context, _ *emptypb.Empty) (*pb.MasterDataGetLatestVersionResponse, error) {
-	version := masterDataBaseVersion
-	if info, err := os.Stat(masterDataBinPath); err == nil {
-		version = fmt.Sprintf("%s_%d", masterDataBaseVersion, info.ModTime().UnixMilli())
+	// 按会话区域返回各自的版本串（JP/GL 各自的 base+mtime，两个文件各自成立）。
+	// 区域指定文件缺失时自动回退到实际存在的那份（交叉共用），版本串按实际文件。
+	region := regionForUser(CurrentUserId(ctx, s.users, s.sessions), s.users)
+	filePath, base, fellBack := resolveMasterData(region)
+	version := base
+	if info, err := os.Stat(filePath); err == nil {
+		version = fmt.Sprintf("%s_%d", base, info.ModTime().UnixMilli())
 	} else {
-		log.Printf("[DataService] stat %s: %v (falling back to base version)", masterDataBinPath, err)
+		log.Printf("[DataService] stat %s: %v (falling back to base version)", filePath, err)
 	}
-	log.Printf("[DataService] GetLatestMasterDataVersion -> %s", version)
+	log.Printf("[DataService] GetLatestMasterDataVersion -> %s (region=%s file=%s fallback=%v)", version, region, filePath, fellBack)
 	return &pb.MasterDataGetLatestVersionResponse{
 		LatestMasterDataVersion: version,
 	}, nil

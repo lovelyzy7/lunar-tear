@@ -14,15 +14,13 @@ import (
 	"lunar-tear/server/internal/gacha"
 	"lunar-tear/server/internal/gametime"
 	"lunar-tear/server/internal/runtime"
+	"lunar-tear/server/internal/service"
 	"lunar-tear/server/internal/store/sqlite"
 )
 
 // masterDataPath 可用环境变量 LUNAR_MASTERDATA 覆盖（多区域/自定义路径）。
 func masterDataPath() string {
-	if v := os.Getenv("LUNAR_MASTERDATA"); v != "" {
-		return v
-	}
-	return "assets/release/20240404193219.bin.e"
+	return service.ServerMasterDataPath()
 }
 
 // envOr returns the environment value of key, or fallback when it is unset.

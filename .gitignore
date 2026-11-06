@@ -54,3 +54,4 @@ server/*.exe
 server/*.dll
 *.exe
 *.dll
+server/logs/

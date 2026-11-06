@@ -238,9 +238,9 @@ func (s *OctoHTTPServer) handleAll(w http.ResponseWriter, r *http.Request) {
 
 	// Master data download (client requests /master-data/<version> when its
 	// cached version differs): serve the real encrypted master data file.
-	// JP/EN 共用同一份文件。
+	// 按版本串前缀映射区域文件（JP / GL 各自一份）。
 	if strings.HasPrefix(path, "/master-data/") {
-		log.Printf("[HTTP] Master data request for path: %s — serving database.bin.e", path)
+		log.Printf("[HTTP] Master data request for path: %s", path)
 		s.serveDatabaseBinE(w, r, path)
 		return
 	}
@@ -469,8 +469,30 @@ func (s *OctoHTTPServer) serveListBin(w http.ResponseWriter, filePath string) {
 // is a cache key (it changes whenever the file's mtime changes, see
 // DataService.GetLatestMasterDataVersion) but does not select a different file —
 // there's only ever one bin.e on disk.
-func (s *OctoHTTPServer) serveDatabaseBinE(w http.ResponseWriter, r *http.Request, _ string) {
-	filePath := filepath.Join(s.BaseDir, "assets", "release", "20240404193219.bin.e")
+func (s *OctoHTTPServer) serveDatabaseBinE(w http.ResponseWriter, r *http.Request, requestPath string) {
+	// 按版本串前缀映射区域文件（JP=20240405123139，GL=20240404193219）；
+	// LUNAR_MASTERDATA 显式覆盖优先（单区兼容）。相对路径基于 BaseDir 解析。
+	relPath := masterDataFileForRequest(requestPath)
+	filePath := relPath
+	if !filepath.IsAbs(filePath) {
+		filePath = filepath.Join(s.BaseDir, filePath)
+	}
+	// 指定文件缺失时自动回退到实际存在的那份（单份主数据交叉共用）。
+	if _, err := os.Stat(filePath); err != nil {
+		if alt := alternativeMasterFile(relPath); alt != "" {
+			altPath := alt
+			if !filepath.IsAbs(altPath) {
+				altPath = filepath.Join(s.BaseDir, altPath)
+			}
+			if _, err2 := os.Stat(altPath); err2 == nil {
+				log.Printf("[HTTP] Master data fallback: %s 缺失，改用 %s（请求 %s，单份主数据交叉共用）", relPath, alt, requestPath)
+				filePath = altPath
+			} else {
+				log.Printf("[HTTP] Master data missing: %s 与 %s 均缺失（请求 %s）-> 404", relPath, alt, requestPath)
+			}
+		}
+	}
+	log.Printf("[HTTP] Master data serve: %s -> %s", requestPath, filePath)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	http.ServeFile(w, r, filePath)
 }
@@ -485,12 +507,14 @@ func (s *OctoHTTPServer) handleWebAPI(w http.ResponseWriter, r *http.Request, pa
 
 	if strings.Contains(path, "termsofuse") {
 		language := staticPageLanguage(path)
+		noteTermsHint(r.Header.Get("X-Requested-With"), language)
 		s.serveLocalizedStaticPage(w, "terms", "Terms of Service", language, termsVersionMarker)
 		return
 	}
 
 	if strings.Contains(path, "privacy") {
 		language := staticPageLanguage(path)
+		noteTermsHint(r.Header.Get("X-Requested-With"), language)
 		s.serveLocalizedStaticPage(w, "privacy", "Privacy Policy", language, privacyVersionMarker)
 		return
 	}

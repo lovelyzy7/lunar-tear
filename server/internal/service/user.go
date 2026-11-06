@@ -94,6 +94,13 @@ func (s *UserServiceServer) Auth(ctx context.Context, req *pb.AuthUserRequest) (
 		return nil, fmt.Errorf("load user: %w", err)
 	}
 
+	// 区域判定：uuid 粘性优先（换包名/重装保号不漂移）；tr blob 的
+	// package_name 只作为包身份输入，判定逻辑统一在 resolveRegion。
+	pkg := packageNameFromTr(req.Tr)
+	r := resolveRegion(req.Uuid, pkg)
+	rememberRegionForUser(user.UserId, r)
+	logRegion("Auth", "uuid="+req.Uuid+" package="+pkg, r)
+
 	return &pb.AuthUserResponse{
 		SessionKey:     session.SessionKey,
 		ExpireDatetime: timestamppb.New(session.ExpireAt),
@@ -295,6 +302,11 @@ func (s *UserServiceServer) SetUserSetting(ctx context.Context, req *pb.SetUserS
 }
 
 func (s *UserServiceServer) GetAndroidArgs(ctx context.Context, req *pb.GetAndroidArgsRequest) (*pb.GetAndroidArgsResponse, error) {
+	// 区域判定（登录流程第一个请求）：显式映射 / UUID 粘性 / terms 语言提示 /
+	// 官方名族模式 / 默认兜底，统一在 resolveRegion；结果按 uuid 粘性持久化，
+	// 供 Auth 与 GetLatestMasterDataVersion 使用。
+	r := resolveRegion(req.Uuid, req.PackageName)
+	logRegion("GetAndroidArgs", "uuid="+req.Uuid+" packageName="+req.PackageName, r)
 	return &pb.GetAndroidArgsResponse{Nonce: "Mama", ApiKey: "1234567890"}, nil
 }
 
