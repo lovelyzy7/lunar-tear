@@ -208,6 +208,9 @@ type PossessionGranter struct {
 	// GachaMedalItemIds are the consumable items of ConsumableItemType
 	// GACHA_MEDAL, limited by Limits.GachaMedal instead of ConsumableItem.
 	GachaMedalItemIds map[int32]bool
+	// Rewrite, when set, changes what is granted before it is (Pod Programs >
+	// Mods: an item that arrives as another).
+	Rewrite func(possessionType model.PossessionType, possessionId, count int32) (model.PossessionType, int32, int32)
 
 	LastChangedStoryWeaponIds []int32
 }
@@ -289,6 +292,9 @@ func (g *PossessionGranter) GrantFullAs(user *UserState, possessionType model.Po
 // box with giftTextId. Other possession types are granted as GrantPossession
 // does. For summons, which grant stackables directly.
 func (g *PossessionGranter) GrantCapped(user *UserState, possessionType model.PossessionType, possessionId, count int32, nowMillis int64, giftTextId int32) {
+	if g.Rewrite != nil {
+		possessionType, possessionId, count = g.Rewrite(possessionType, possessionId, count)
+	}
 	if have, limit, ok := g.stackLimit(user, possessionType, possessionId); ok && limit > 0 && count > 0 {
 		room := max(int64(limit)-have, 0)
 		if int64(count) > room {
@@ -459,6 +465,9 @@ func (g *PossessionGranter) grantCompanionEnhanced(user *UserState, companionEnh
 // player past an MConfig possession limit. For a costume or companion the
 // player owns, that is whether its duplicate exchange would.
 func (g *PossessionGranter) WouldOverflow(user *UserState, possessionType model.PossessionType, possessionId, count int32) bool {
+	if g.Rewrite != nil { // checked as what arrives (Pod Programs > Mods)
+		possessionType, possessionId, count = g.Rewrite(possessionType, possessionId, count)
+	}
 	n := int64(max(count, 1))
 	over := func(have int64, limit int32, add int64) bool {
 		return limit > 0 && have+add > int64(limit)

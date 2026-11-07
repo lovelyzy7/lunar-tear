@@ -19,6 +19,7 @@ type DrawnItem struct {
 	PossessionId   int32
 	RarityType     model.RarityType
 	CharacterId    int32
+	Count          int32
 }
 
 // Lunar Tear's rates; DefaultRates in rates.go matches them, and Pod Programs can change them.

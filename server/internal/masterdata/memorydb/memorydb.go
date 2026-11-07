@@ -50,6 +50,31 @@ func Init(binPath string) error {
 	return nil
 }
 
+// Check validates that path is readable master data without keeping its tables:
+// read, decrypt, parse the TOC and verify every table lies within the data blob.
+func Check(binPath string) error {
+	encrypted, err := os.ReadFile(binPath)
+	if err != nil {
+		return fmt.Errorf("read bin.e: %w", err)
+	}
+	decrypted, err := decrypt(encrypted)
+	if err != nil {
+		return fmt.Errorf("decrypt: %w", err)
+	}
+	toc, dataBlob, err := parseHeader(decrypted)
+	if err != nil {
+		return fmt.Errorf("parse header: %w", err)
+	}
+	for name, offLen := range toc {
+		off := offLen[0]
+		length := offLen[1]
+		if off+length > len(dataBlob) {
+			return fmt.Errorf("table %q: offset %d + length %d exceeds data blob size %d", name, off, length, len(dataBlob))
+		}
+	}
+	return nil
+}
+
 func TableCount() int {
 	return len(tables)
 }

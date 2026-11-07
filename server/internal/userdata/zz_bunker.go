@@ -5,9 +5,10 @@ package userdata
 
 import (
 	"log"
+	"slices"
 	"sort"
-	"sync"
 
+	"lunar-tear/server/internal/bunkercache"
 	"lunar-tear/server/internal/masterdata"
 	"lunar-tear/server/internal/store"
 	"lunar-tear/server/internal/utils"
@@ -183,7 +184,7 @@ type levelBonusTables struct {
 	levels  map[int32][]int32 // CostumeLevelBonusId -> bonus levels, ascending
 }
 
-var levelBonuses = sync.OnceValue(func() levelBonusTables {
+var levelBonuses = bunkercache.Value(func() levelBonusTables {
 	t := levelBonusTables{bonusId: map[int32]int32{}, levels: map[int32][]int32{}}
 	costumes, err := utils.ReadTable[masterdata.EntityMCostume]("m_costume")
 	if err != nil {
@@ -281,7 +282,7 @@ func bunkerChangedTables(before, after *store.UserState) []string {
 	if before.Ext.Pvp.DefenseDeckNumber != after.Ext.Pvp.DefenseDeckNumber {
 		out = append(out, "IUserPvpDefenseDeck")
 	}
-	if len(before.Ext.Pvp.Weekly) != len(after.Ext.Pvp.Weekly) {
+	if !slices.Equal(before.Ext.Pvp.Weekly, after.Ext.Pvp.Weekly) {
 		out = append(out, "IUserPvpWeeklyResult")
 	}
 	out = append(out, costumeChangedTables(before, after)...)

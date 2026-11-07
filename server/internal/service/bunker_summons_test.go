@@ -5,6 +5,7 @@ import (
 
 	"lunar-tear/server/internal/gacha"
 	"lunar-tear/server/internal/gametime"
+	"lunar-tear/server/internal/masterdata"
 	"lunar-tear/server/internal/model"
 	"lunar-tear/server/internal/store"
 )
@@ -22,6 +23,9 @@ func TestSummonCatalogRules(t *testing.T) {
 	byId, _ := catalogById(t)
 	if _, ok := byId[45]; !ok || byId[45].EndDatetime > 2_000_000_000_000 {
 		t.Skip("needs the original master data")
+	}
+	if japaneseMaster(t) {
+		t.Skip("Global's summon IDs; the Japanese master keeps the original ones")
 	}
 	// Multi-step summons: one entry each, steps from the game's step pages.
 	if e := byId[9000041]; e.GachaModeType != model.GachaModeStepup || e.MaxStepNumber != 5 || len(e.PricePhases) != 5 {
@@ -51,27 +55,51 @@ func TestSummonCatalogRules(t *testing.T) {
 	if len(g) != 1 || g[0].PriceType != model.PriceTypePaidGem || g[0].FixedRarityMin != model.RaritySSRare || g[0].LimitExecCount != 1 {
 		t.Errorf("paid guaranteed summon: %+v", g)
 	}
+	// Lacrima Girl: the game text titles 153 "Paid Only", but its art
+	// (title_logo) is the regular summon's; limited_152 is the "Paid Gems
+	// Only" one and runs beside it.
 	for _, p := range byId[153].PricePhases {
-		if p.PriceType != model.PriceTypePaidGem {
-			t.Errorf("paid-only summon 153 phase %+v", p)
+		if p.PriceType == model.PriceTypePaidGem {
+			t.Errorf("regular Lacrima Girl summon 153 phase %+v", p)
 		}
 	}
 	if byId[153].MedalConsumableItemId == 0 {
-		t.Error("paid-only summon lost its medal")
+		t.Error("Lacrima Girl summon lost its medal")
 	}
-	for _, skipped := range []int32{69, 93, 486, 534} {
-		if _, ok := byId[skipped]; ok {
-			t.Errorf("bonus or newcomer summon %d offered", skipped)
+	// So is Fractured Weapon: 163 regular (text: "Lacrima Girl"), 164 its paid twin.
+	for twinId, regular := range map[int32]int32{152: 153, 164: 163} {
+		twin, ok := byId[twinId]
+		if !ok || twin.StartDatetime != byId[regular].StartDatetime || twin.EndDatetime != byId[regular].EndDatetime {
+			t.Errorf("paid twin %d of %d: %+v", twinId, regular, twin)
+		} else if p := twin.PricePhases; len(p) != 1 || p[0].PriceType != model.PriceTypePaidGem || p[0].Price != 3000 || p[0].DrawCount != 10 {
+			t.Errorf("paid twin %d draws: %+v", twinId, p)
 		}
+	}
+	// Bonus summons whose only rows are 2099 placeholders stay out; those with
+	// a notice run with its rules (Monthly Bonus Summons, Mar. 2023: notice 1040).
+	for _, skipped := range []int32{69, 93} {
+		if _, ok := byId[skipped]; ok {
+			t.Errorf("bonus summon %d offered", skipped)
+		}
+	}
+	if p := byId[486].PricePhases; len(p) != 1 || p[0].Price != 3000 || p[0].DrawCount != 10 || p[0].LimitExecCount != 5 {
+		t.Errorf("Monthly Bonus Summons 486: %+v", p)
+	}
+	if _, ok := byId[534]; !ok {
+		t.Error("newcomer pack summon 534 not offered")
 	}
 	// Reruns parked in 2099 take their shop's dates (the original's; the
 	// everything-open data moves the medal's conversion date out).
 	if e := byId[159]; e.EndDatetime < 1_700_000_000_000 && (e.StartDatetime != 1652148000000 || e.EndDatetime != 1655085599000) {
 		t.Errorf("FFXIV rerun %d-%d", e.StartDatetime, e.EndDatetime)
 	}
-	// Chapter summons no longer use Mama's Dream ids.
+	// Chapter summons no longer use Mama's Dream ids; Mama's Dream itself is
+	// on the chapter tab for the client's box screen.
 	chapters := 0
 	for id, e := range byId {
+		if _, prizeBox := masterdata.PrizeBoxFor(id); prizeBox {
+			continue
+		}
 		if e.GachaLabelType == model.GachaLabelChapter {
 			chapters++
 			if id < model.ChapterGachaIdBase {
@@ -173,6 +201,9 @@ func TestBannerlessSummons(t *testing.T) {
 	if w.EndDatetime > 1_700_000_000_000 {
 		t.Skip("needs the original master data")
 	}
+	if japaneseMaster(t) {
+		t.Skip("Global's summon dates; the Japanese master has its own")
+	}
 	if w.BannerAssetName != "limited_10001" || w.StartDatetime != 1647914400000 || w.EndDatetime != 1648432799000 || w.CeilingCount != 150 {
 		t.Errorf("weekly summon 10001: %+v", w)
 	}
@@ -185,9 +216,31 @@ func TestBannerlessSummons(t *testing.T) {
 			t.Errorf("summon %d not offered", id)
 		}
 	}
-	for _, id := range []int32{617, 10016, 10107, 10108, 9000040} {
+	// The last weekly summons (04-30-2023) have no art; they reran Lars's and
+	// Griff's of 03-19 and show those.
+	for id, art := range map[int32]string{10107: "limited_10094", 10108: "limited_10095"} {
+		if e, ok := byId[id]; !ok || e.BannerAssetName != art {
+			t.Errorf("weekly summon %d: %+v", id, e)
+		}
+	}
+	for _, id := range []int32{617, 10016, 9000040} {
 		if _, ok := byId[id]; ok {
 			t.Errorf("summon %d without art offered", id)
 		}
+	}
+}
+
+// The Japanese master keeps the Yuletide multi-step summon under its own ID,
+// 503001 (Global moved it to 9000035), with its 2021 dates and no medal row
+// of its own: it shares medal 8021 with the Yuletide summon 123 it ran beside.
+func TestJapaneseYuletideStepUp(t *testing.T) {
+	byId, _ := catalogById(t)
+	if byId[123].MedalConsumableItemId != 8021 {
+		t.Skip("needs the original Japanese master data")
+	}
+	e, ok := byId[503001]
+	if !ok || e.GachaModeType != model.GachaModeStepup || e.MaxStepNumber != 5 || e.MedalConsumableItemId != 8021 ||
+		e.StartDatetime != 1640224800000 {
+		t.Fatalf("Yuletide step-up 503001: %v %+v", ok, e)
 	}
 }

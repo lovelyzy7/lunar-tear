@@ -4,6 +4,7 @@ import (
 	"log"
 
 	"lunar-tear/server/internal/model"
+	"lunar-tear/server/internal/mods"
 )
 
 const StaminaRecoveryDivisor int64 = 180
@@ -25,6 +26,10 @@ func SettleStamina(user *UserState, maxStaminaMillis int32, nowMillis int64) {
 }
 
 func ConsumeStamina(user *UserState, costUnits int32, maxStaminaMillis int32, nowMillis int64) {
+	if mods.Get().StaminaFree { // Pod Programs > Mods
+		log.Printf("[ConsumeStamina] cost=%d free (mod)", costUnits)
+		return
+	}
 	SettleStamina(user, maxStaminaMillis, nowMillis)
 	user.Status.StaminaMilliValue = max(user.Status.StaminaMilliValue-costUnits*1000, 0)
 	user.Status.StaminaUpdateDatetime = nowMillis

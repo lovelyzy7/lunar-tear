@@ -45,6 +45,23 @@ func TestNowFollowsTheCalendar(t *testing.T) {
 	}
 }
 
+func TestStartNextLoopFindsDataBesideTheMaster(t *testing.T) {
+	dir := t.TempDir()
+	master := filepath.Join(dir, "master.bin.e")
+	os.WriteFile(master, []byte("loop1"), 0600)
+	os.WriteFile(filepath.Join(dir, NextName), []byte("loop2"), 0600)
+	path := filepath.Join(dir, "calendar.json")
+	// iOS moves the app's folder on every install, so a stored full path goes stale.
+	c := &Calendar{Loop: 1, LoopStart: ms(t, "2026-10-07T02:00:00Z"), Speed: 1, Next: "/old/container/calendar-next.bin.e", NextLoop: 2}
+	got, err := StartNextLoop(path, master, c, c.End())
+	if err != nil || got.Loop != 2 {
+		t.Fatalf("next loop: %+v %v", got, err)
+	}
+	if raw, _ := os.ReadFile(master); string(raw) != "loop2" {
+		t.Fatalf("master not swapped: %q", raw)
+	}
+}
+
 func TestStartNextLoop(t *testing.T) {
 	dir := t.TempDir()
 	master := filepath.Join(dir, "master.bin.e")
@@ -95,52 +112,39 @@ func TestStartNextLoop(t *testing.T) {
 	}
 }
 
-// TestRewindLoop pins B 方案's per-loop rotation restart: when the loop's game
-// data runs out and no next-loop data file exists (Lunar Tear has no Pod
-// Programs to build one), the clock jumps back one whole loop so the rotating
-// terms run again from LoopStart, and the loop counter advances so the
-// per-loop save reset fires.
-func TestRewindLoop(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "calendar.json")
-	start := ms(t, "2021-07-28T02:00:00Z") // Launch
-	c := &Calendar{Loop: 1, LoopStart: start, JumpMillis: -1000, Speed: 1}
+// The original-dates view moves what the game sees back by the calendar's
+// offset; it is off unless the calendar is on and the setting is.
+func TestViewOffsetOnlyWithOriginalDates(t *testing.T) {
+	defer SetCalendar(nil)
+	SetCalendar(nil)
+	if ViewOffset() != 0 {
+		t.Fatal("offset with the calendar off")
+	}
+	c := &Calendar{Loop: 1, LoopStart: Launch + 100*weekMillis}
+	SetCalendar(c)
+	if ViewOffset() != 0 {
+		t.Fatal("offset with the setting off")
+	}
+	c.OriginalDates = true
+	if ViewOffset() != 100*weekMillis {
+		t.Fatalf("offset %d", ViewOffset())
+	}
+	SetCalendar(&Calendar{Loop: 2, LoopStart: Launch + 244*weekMillis, OriginalDates: true})
+	if ViewOffset() != 244*weekMillis {
+		t.Fatalf("loop 2 offset %d", ViewOffset())
+	}
+}
 
-	// Before the end nothing changes (game clock = real-1000 stays below End).
-	got, err := RewindLoop(path, c, c.End()-1)
-	if err != nil || got != c {
-		t.Fatalf("rewound early: %+v %v", got, err)
+func TestToViewKeepsSentinels(t *testing.T) {
+	defer SetCalendar(nil)
+	SetCalendar(&Calendar{Loop: 1, LoopStart: Launch + 100*weekMillis, OriginalDates: true})
+	real := Launch + 120*weekMillis
+	if got := ToView(real); got != real-100*weekMillis {
+		t.Fatalf("real time %d -> %d", real, got)
 	}
-	// At the end (game clock = real-1000 = End when real = End+1000) the clock
-	// goes back one whole loop; LoopStart stays (the game data's dates are
-	// still aligned to it) and the loop counter moves on.
-	got, err = RewindLoop(path, c, c.End()+1000)
-	if err != nil {
-		t.Fatalf("rewind: %v", err)
-	}
-	if got.Loop != 2 {
-		t.Fatalf("loop = %d, want 2", got.Loop)
-	}
-	if got.LoopStart != start {
-		t.Fatalf("loopStart moved to %d, want %d (data still aligned to it)", got.LoopStart, start)
-	}
-	if want := c.JumpMillis - LoopWeeks*weekMillis; got.JumpMillis != want {
-		t.Fatalf("jump = %dms, want %dms (one whole loop back)", got.JumpMillis, want)
-	}
-	// The rewind lands the game clock back at LoopStart.
-	if real := c.End() + 1000; real+got.Shift(real) != start {
-		t.Fatalf("game clock after rewind = %d, want loopStart=%d", real+got.Shift(real), start)
-	}
-	if saved, err := LoadCalendar(path); err != nil || saved.Loop != 2 || saved.JumpMillis != got.JumpMillis {
-		t.Fatalf("rewind not saved: %+v %v", saved, err)
-	}
-	// A calendar that waits for its next-loop file is left alone.
-	waiting := &Calendar{Loop: 2, LoopStart: start, Speed: 1, Next: filepath.Join(dir, "next.bin.e"), NextLoop: 3}
-	if again, err := RewindLoop(path, waiting, waiting.End()); err != nil || again != waiting {
-		t.Fatalf("rewound past a pending next-loop file: %+v %v", again, err)
-	}
-	// And so is a running loop (game clock still before the end).
-	if again, err := RewindLoop(path, c, c.End()-1); err != nil || again != c {
-		t.Fatalf("rewound a running loop: %+v %v", again, err)
+	for _, v := range []int64{0, 4070908800000, 253402300799000, 946684799999} {
+		if ToView(v) != v {
+			t.Fatalf("sentinel %d moved", v)
+		}
 	}
 }

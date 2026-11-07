@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"log"
 	"sort"
-	"sync"
 
+	"lunar-tear/server/internal/bunkercache"
 	"lunar-tear/server/internal/model"
 	"lunar-tear/server/internal/store"
 	"lunar-tear/server/internal/utils"
@@ -29,11 +29,12 @@ const (
 // ChapterTicket is one chapter summon: the ticket that pays for it and the
 // main quest chapter whose quests drop the ticket (0 for the ex summon).
 type ChapterTicket struct {
-	Box                []store.GachaBoxContent // the chapter's materials (chapterBox)
-	ConsumableItemId   int32
-	MainQuestChapterId int32
-	UnlockQuestId      int32 // last normal-difficulty quest of the chapter
-	AssetName          string
+	Box                 []store.GachaBoxContent // the chapter's materials (chapterBox)
+	ConsumableItemId    int32
+	MainQuestChapterId  int32
+	UnlockQuestId       int32 // last normal-difficulty quest of the chapter
+	EventQuestChapterId int32 // the ex summon's: the first Dark Memory chapter, where its "To Quests" goes
+	AssetName           string
 }
 
 // LoadChapterTickets derives the chapter summons from the drop tables.
@@ -151,7 +152,11 @@ func LoadChapterTickets() ([]ChapterTicket, error) {
 	}
 	// ticket -> whether every event chapter dropping it is END_CONTENTS
 	eventOnlyEndContents := make(map[int32]bool)
+	firstEndChapter := EntityMEventQuestChapter{}
 	for _, ch := range eventChapters {
+		if ch.EventQuestType == eventQuestTypeEndContents && (firstEndChapter.EventQuestChapterId == 0 || ch.SortOrder < firstEndChapter.SortOrder) {
+			firstEndChapter = ch
+		}
 		for _, seqId := range eventGroupSequences[ch.EventQuestSequenceGroupId] {
 			for _, questId := range eventQuestsBySequence[seqId] {
 				for _, t := range ticketsOfQuest(questId) {
@@ -189,7 +194,8 @@ func LoadChapterTickets() ([]ChapterTicket, error) {
 	}
 	if len(exTickets) == 1 {
 		out = append(out, ChapterTicket{ConsumableItemId: exTickets[0], AssetName: chapterGachaExAssetName,
-			Box: chapterBox(questsByTicket[exTickets[0]], pickupDrops, pickupByQuest, dropById)})
+			EventQuestChapterId: firstEndChapter.EventQuestChapterId,
+			Box:                 chapterBox(questsByTicket[exTickets[0]], pickupDrops, pickupByQuest, dropById)})
 	}
 	return out, nil
 }
@@ -205,15 +211,24 @@ func chapterGachaEntry(t ChapterTicket) store.GachaCatalogEntry {
 		GachaAutoResetType:        model.GachaAutoResetNone,
 		IsUserGachaUnlock:         true,
 		RelatedMainQuestChapterId: t.MainQuestChapterId,
-		GachaDecorationType:       model.GachaDecorationNormal,
-		BoxContents:               t.Box,
-		SortOrder:                 chapterGachaSortOrderBase + t.MainQuestChapterId,
-		BannerAssetName:           t.AssetName,
-		GroupId:                   gachaId,
-		PricePhases:               buildChapterPricePhases(gachaId, t.ConsumableItemId),
-		UnlockConditionType:       model.GachaUnlockNone,
+		// "To Quests" opens this event chapter when it is set, else the main
+		// quest chapter (GachaTopScreenPresenter.OpenLinkScreen); the ex
+		// summon has no main chapter, and chapter 0 stopped the game on an
+		// empty Quests screen.
+		RelatedEventQuestChapterId: t.EventQuestChapterId,
+		GachaDecorationType:        model.GachaDecorationNormal,
+		BoxContents:                t.Box,
+		SortOrder:                  chapterGachaSortOrderBase + t.MainQuestChapterId,
+		BannerAssetName:            t.AssetName,
+		GroupId:                    gachaId,
+		PricePhases:                buildChapterPricePhases(gachaId, t.ConsumableItemId),
+		UnlockConditionType:        model.GachaUnlockNone,
 	}
-	if t.UnlockQuestId != 0 {
+	if t.AssetName == chapterGachaExAssetName {
+		// Opens with Dark Memories (model.GachaUnlockDarkMemories): its To
+		// Quests goes there.
+		e.UnlockConditionType = model.GachaUnlockDarkMemories
+	} else if t.UnlockQuestId != 0 {
 		e.UnlockConditionType = model.GachaUnlockMainQuestClear
 		e.UnlockConditionValue = t.UnlockQuestId
 	}
@@ -226,7 +241,7 @@ func chapterGachaEntry(t ChapterTicket) store.GachaCatalogEntry {
 // (chapterBoxCounts by rarity); the rarest are its targets.
 var chapterBoxCounts = map[int32]int32{model.RarityNormal: 10, model.RarityRare: 6, model.RaritySRare: 3, model.RaritySSRare: 1}
 
-var materialRarity = sync.OnceValue(func() map[int32]int32 {
+var materialRarity = bunkercache.Value(func() map[int32]int32 {
 	rows, err := utils.ReadTable[EntityMMaterial]("m_material")
 	if err != nil {
 		log.Printf("[ChapterGacha] m_material: %v", err)
